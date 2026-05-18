@@ -70,12 +70,13 @@ export default function ReportesPage() {
   const trpc = useTRPC();
   const [generating, setGenerating] = useState<string | null>(null);
 
-  const { data: periodoActivo } = useQuery(trpc.periodo.active.queryOptions());
+  const { data: user } = useQuery({ ...trpc.auth.me.queryOptions() });
+  const { data: periodoActivo } = useQuery({ ...trpc.periodo.active.queryOptions() });
 
   const generateMutation = useMutation(
     trpc.reporte.generatePDF.mutationOptions({
       onSuccess: (data) => {
-        downloadBase64PDF(data.base64, data.filename);
+        downloadBase64PDF(data.pdf, data.filename);
         setGenerating(null);
       },
       onError: () => {
@@ -90,6 +91,20 @@ export default function ReportesPage() {
     setGenerating(tipo);
     generateMutation.mutate({ periodoId: periodoActivo.id, tipo });
   };
+
+  if (user?.role !== 'ADMIN') {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] text-center">
+        <div className="h-16 w-16 bg-red-500/10 rounded-full flex items-center justify-center mb-4">
+          <FileText className="h-8 w-8 text-red-400" />
+        </div>
+        <h2 className="text-xl font-bold text-white">Acceso Restringido</h2>
+        <p className="text-gray-500 mt-2 max-w-sm">
+          Solo los administradores del sistema tienen permiso para generar reportes operacionales y de gestión.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div>

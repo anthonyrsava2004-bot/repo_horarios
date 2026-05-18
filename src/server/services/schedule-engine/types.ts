@@ -1,4 +1,4 @@
-import { CategoriaDocente, TipoDocente } from '@/generated/prisma/enums';
+import { CategoriaDocente, TipoDocente } from '@/generated/prisma/client';
 
 // ── Core Types ─────────────────────────────────────
 

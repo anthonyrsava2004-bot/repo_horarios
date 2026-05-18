@@ -167,6 +167,11 @@ interface DocenteReportData {
   slots: SlotData[];
 }
 
+interface CicloReportData {
+  ciclo: number;
+  slots: SlotData[];
+}
+
 interface ManagementData {
   periodoNombre: string;
   totalDocentes: number;
@@ -203,6 +208,8 @@ function header(title: string, subtitle: string, periodo: string): string {
 }
 
 function scheduleGrid(slots: SlotData[], horas: string[]): string {
+  const rendered = new Set<string>(); // Keep track of rendered cells for rowSpan
+
   return `
     <table class="schedule-table">
       <thead>
@@ -212,18 +219,38 @@ function scheduleGrid(slots: SlotData[], horas: string[]): string {
         </tr>
       </thead>
       <tbody>
-        ${horas.map((hora) => `
+        ${horas.map((hora, rowIndex) => `
           <tr>
             <td class="hora-cell">${hora}</td>
             ${DIAS_ORDER.map((dia) => {
+              const key = `${dia}-${hora}`;
+              if (rendered.has(key)) return '';
+
               const s = slots.find((sl) => sl.dia === dia && sl.horaInicio === hora);
-              return `<td>${s ? `
-                <div class="slot-content">
-                  <div class="curso">${s.cursoCodigo} G${s.grupoNombre}</div>
-                  <div class="detalle">${s.docenteNombre.split(' ').slice(0, 2).join(' ')}</div>
-                  <div class="detalle">${s.aulaCodigo} · ${s.tipo}</div>
-                </div>
-              ` : ''}</td>`;
+              if (!s) return '<td></td>';
+
+              // Calculate rowSpan
+              let rowSpan = 1;
+              for (let i = rowIndex + 1; i < horas.length; i++) {
+                const nextHora = horas[i];
+                const nextS = slots.find((sl) => sl.dia === dia && sl.horaInicio === nextHora);
+                if (nextS && nextS.cursoCodigo === s.cursoCodigo && nextS.grupoNombre === s.grupoNombre && nextS.aulaCodigo === s.aulaCodigo) {
+                  rowSpan++;
+                  rendered.add(`${dia}-${nextHora}`);
+                } else {
+                  break;
+                }
+              }
+
+              return `
+                <td rowspan="${rowSpan}">
+                  <div class="slot-content">
+                    <div class="curso">${s.cursoCodigo} G${s.grupoNombre}</div>
+                    <div class="detalle">${s.docenteNombre.split(' ').slice(0, 2).join(' ')}</div>
+                    <div class="detalle">${s.aulaCodigo} · ${s.tipo}</div>
+                  </div>
+                </td>
+              `;
             }).join('')}
           </tr>
         `).join('')}
@@ -274,6 +301,26 @@ export function generateDocenteReportHTML(
           Total de horas asignadas: <strong>${doc.slots.length}</strong>
         </p>
       </div>
+    </div>
+  `).join('');
+
+  return `<!DOCTYPE html><html><head>${STYLES}</head><body>${pages}<div class="footer">Sistema de Horarios ISI — UNT</div></body></html>`;
+}
+
+export function generateCicloReportHTML(
+  ciclos: CicloReportData[],
+  periodoNombre: string
+): string {
+  const defaultHoras = Array.from({ length: 15 }, (_, i) => `${String(7 + i).padStart(2, '0')}:00`);
+
+  const pages = ciclos.map((c) => `
+    <div class="page">
+      ${header(
+        'Horario por Ciclo',
+        `Ciclo Académico ${c.ciclo}`,
+        periodoNombre
+      )}
+      ${scheduleGrid(c.slots, defaultHoras)}
     </div>
   `).join('');
 

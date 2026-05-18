@@ -1,5 +1,5 @@
 import type { DocenteForSchedule } from './types';
-import type { CategoriaDocente, TipoDocente } from '@/generated/prisma/enums';
+import type { CategoriaDocente, TipoDocente } from '@/generated/prisma/client';
 
 /**
  * Priority ordering for docente types.

@@ -3,8 +3,9 @@
 // Flujo: Llenado Presencial Secuencial por Jerarquía
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider        = "prisma-client-js"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
@@ -40,6 +41,7 @@ enum DiaSemana {
 
 enum TipoAsignacion {
   TEORIA
+  PRACTICA
   LABORATORIO
 }
 
@@ -61,44 +63,147 @@ enum EstadoTurno {
   AUSENTE
 }
 
+enum UserRole {
+  ADMIN
+  DOCENTE
+  ESTUDIANTE
+  INVITADO
+  REPRESENTANTE_ESCUELA
+}
+
+enum EstadoPeriodo {
+  PLANIFICACION
+  POSTULACION
+  ASIGNACION
+  FINALIZADO
+}
+
 // ──── Models Base ──────────────────────────────────────
 
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  nombre    String
+  role      UserRole @default(DOCENTE)
+  activo    Boolean  @default(true)
+  docenteId String?  @unique @map("docente_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  docente Docente? @relation(fields: [docenteId], references: [id], onDelete: SetNull)
+  logs    Log[]
+
+  @@map("users")
+}
+
+model Log {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  accion    String   // "LOGIN", "CREATE_AULA", etc.
+  detalles  String?  @db.Text
+  ip        String?
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("logs")
+}
+
 model Docente {
-  id         String            @id @default(cuid())
-  nombre     String
-  email      String            @unique
-  categoria  CategoriaDocente
-  tipo       TipoDocente
-  antiguedad DateTime
-  activo     Boolean           @default(true)
-  createdAt  DateTime          @default(now()) @map("created_at")
-  updatedAt  DateTime          @updatedAt @map("updated_at")
+  id                String            @id @default(cuid())
+  nombre            String
+  email             String            @unique
+  categoria         CategoriaDocente
+  tipo              TipoDocente
+  antiguedad        DateTime
+  activo            Boolean           @default(true)
+  gradoAcademico    String?           @map("grado_academico")
+  especialidad      String?
+  experienciaAnios  Int               @default(0) @map("experiencia_anios")
+  perfilAcademico   String?           @map("perfil_academico") @db.Text
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
 
   asignaciones     Asignacion[]
   restricciones    RestriccionDocente[]
   docenteGrupos    DocenteGrupo[]
   preasignaciones  Preasignacion[]
   turnos           TurnoDocente[]
+  disponibilidades DisponibilidadDocente[]
+  postulaciones    PostulacionCurso[]
+  notificaciones   Notification[]
+  user             User?
 
   @@index([tipo, categoria, antiguedad])
   @@map("docentes")
 }
 
+model Notification {
+  id        String   @id @default(cuid())
+  docenteId String   @map("docente_id")
+  titulo    String
+  mensaje   String   @db.Text
+  leida     Boolean  @default(false)
+  tipo      String   @default("INFO") // "INFO", "TURN_START", "SYSTEM"
+  link      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  docente   Docente  @relation(fields: [docenteId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
 model Curso {
-  id                  String  @id @default(cuid())
-  codigo              String  @unique
+  id                  String   @id @default(cuid())
+  codigo              String   @unique
   nombre              String
   creditos            Int
-  horasTeoria         Int     @map("horas_teoria")
-  horasLaboratorio    Int     @map("horas_laboratorio")
+  horasTeoria         Int      @map("horas_teoria")
+  horasLaboratorio    Int      @map("horas_laboratorio")
   ciclo               Int
-  requiereLaboratorio Boolean @default(false) @map("requiere_laboratorio")
+  requiereLaboratorio Boolean  @default(false) @map("requiere_laboratorio")
+  perfilRequerido     String?  @map("perfil_requerido") @db.Text
+  gradoRequerido      String?  @map("grado_requerido")
+  experienciaMinima   Int      @default(0) @map("experiencia_minima")
+  especialidadRequerida String? @map("especialidad_requerida")
+  aperturado          Boolean  @default(false)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  grupos Grupo[]
+  grupos        Grupo[]
+  postulaciones PostulacionCurso[]
 
   @@map("cursos")
+}
+
+model DisponibilidadDocente {
+  id              String        @id @default(cuid())
+  docenteId       String        @map("docente_id")
+  franjaHorariaId String        @map("franja_horaria_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  docente         Docente       @relation(fields: [docenteId], references: [id], onDelete: Cascade)
+  franjaHoraria   FranjaHoraria @relation(fields: [franjaHorariaId], references: [id], onDelete: Cascade)
+
+  @@unique([docenteId, franjaHorariaId])
+  @@map("disponibilidades_docentes")
+}
+
+model PostulacionCurso {
+  id             String   @id @default(cuid())
+  docenteId      String   @map("docente_id")
+  cursoId        String   @map("curso_id")
+  prioridad      Int      @default(1)
+  compatibilidad Float    @default(0)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  docente Docente @relation(fields: [docenteId], references: [id], onDelete: Cascade)
+  curso   Curso   @relation(fields: [cursoId], references: [id], onDelete: Cascade)
+
+  @@unique([docenteId, cursoId])
+  @@map("postulaciones_cursos")
 }
 
 model Grupo {
@@ -137,13 +242,14 @@ model Aula {
 }
 
 model PeriodoAcademico {
-  id          String   @id @default(cuid())
-  nombre      String   @unique  // "2026-I", "2026-II"
-  fechaInicio DateTime @map("fecha_inicio")
-  fechaFin    DateTime @map("fecha_fin")
-  activo      Boolean  @default(false)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String        @id @default(cuid())
+  nombre      String        @unique // "2026-I", "2026-II"
+  fechaInicio DateTime      @map("fecha_inicio")
+  fechaFin    DateTime      @map("fecha_fin")
+  activo      Boolean       @default(false)
+  estado      EstadoPeriodo @default(PLANIFICACION)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
 
   grupos          Grupo[]
   asignaciones    Asignacion[]
@@ -165,6 +271,7 @@ model FranjaHoraria {
   restricciones      RestriccionDocente[]
   mantenimientos     MantenimientoAula[]
   preasignaciones    Preasignacion[]
+  disponibilidades   DisponibilidadDocente[]
 
   @@unique([dia, horaInicio, horaFin])
   @@map("franjas_horarias")

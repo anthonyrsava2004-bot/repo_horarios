@@ -3,7 +3,7 @@
 import { useTRPC } from '@/trpc/client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Building2, FlaskConical, User } from 'lucide-react';
+import { Building2, FlaskConical, User, Calendar, CheckCircle2, FileDown } from 'lucide-react';
 import Link from 'next/link';
 
 const DIAS = ['LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES'];
@@ -23,51 +23,80 @@ const SLOT_COLORS = [
   'bg-orange-500/20 border-orange-500/30 text-orange-300',
 ];
 
-type ViewMode = 'general' | 'aula' | 'docente';
+type ViewMode = 'general' | 'aula' | 'docente' | 'mi-horario';
 
 type HorarioAsignacion = {
   id: string;
+  tipo: 'TEORIA' | 'PRACTICA' | 'LABORATORIO';
   grupo: {
     nombre: string;
     cursoId?: string;
-    curso: { id: string; codigo: string };
+    curso: { id: string; codigo: string; nombre: string; ciclo: number };
   };
-  docente?: { nombre: string };
-  aula?: { codigo: string };
-  franjaHoraria: { dia: string; horaInicio: string };
+  docente?: { nombre: string; tipo: string; categoria: string };
+  aula?: { codigo: string; nombre: string; tipo: string };
+  franjaHoraria: { dia: string; horaInicio: string; horaFin: string };
 };
 
 export default function HorariosPage() {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
-  const [viewMode, setViewMode] = useState<ViewMode>('general');
+  const { data: user } = useQuery({ ...trpc.auth.me.queryOptions() });
+  const isAdmin = user?.role === 'ADMIN';
+  const isDocente = user?.role === 'DOCENTE';
+
+  const [viewMode, setViewMode] = useState<ViewMode>(isDocente ? 'mi-horario' : 'general');
   const [selectedAulaId, setSelectedAulaId] = useState<string | null>(null);
   const [selectedDocenteId, setSelectedDocenteId] = useState<string | null>(null);
   const [showAutoModal, setShowAutoModal] = useState(false);
 
-  const { data: periodoActivo } = useQuery(trpc.periodo.active.queryOptions());
-  const { data: aulas = [] } = useQuery(trpc.aula.list.queryOptions({}));
-  const { data: docentes = [] } = useQuery(trpc.docente.list.queryOptions({}));
+  const { data: periodoActivo } = useQuery({ ...trpc.periodo.active.queryOptions() });
+  const { data: aulas = [] } = useQuery({ ...trpc.aula.list.queryOptions({}) });
+  const { data: docentes = [] } = useQuery({ ...trpc.docente.list.queryOptions({}) });
+  const { data: franjas = [] } = useQuery({ ...trpc.periodo.franjas.queryOptions() });
+
+  const { data: personalStats } = useQuery({
+    ...trpc.docente.personalStats.queryOptions(),
+    enabled: isDocente,
+  });
 
   const queryInput = viewMode === 'aula' && selectedAulaId
     ? { aulaId: selectedAulaId, periodoId: periodoActivo?.id ?? '' }
     : viewMode === 'docente' && selectedDocenteId
       ? { docenteId: selectedDocenteId, periodoId: periodoActivo?.id ?? '' }
-      : { periodoId: periodoActivo?.id ?? '' };
+      : viewMode === 'mi-horario' && user?.docenteId
+        ? { docenteId: user.docenteId, periodoId: periodoActivo?.id ?? '' }
+        : { periodoId: periodoActivo?.id ?? '' };
 
-  const queryOpts = (viewMode === 'aula' && selectedAulaId
+  const queryOpts = viewMode === 'aula' && selectedAulaId
     ? trpc.horario.byAula.queryOptions(queryInput as { aulaId: string; periodoId: string })
-    : viewMode === 'docente' && selectedDocenteId
+    : (viewMode === 'docente' && selectedDocenteId) || (viewMode === 'mi-horario' && user?.docenteId)
       ? trpc.horario.byDocente.queryOptions(queryInput as { docenteId: string; periodoId: string })
-      : trpc.horario.list.queryOptions({ periodoId: periodoActivo?.id ?? '' })) as unknown;
+      : trpc.horario.list.queryOptions({ periodoId: periodoActivo?.id ?? '' });
 
-  const queryResult = useQuery<any>({
-    ...(queryOpts as any),
+  const queryResult = useQuery({
+    ...queryOpts,
     enabled: !!periodoActivo?.id,
   });
 
   const asignaciones = (queryResult.data ?? []) as HorarioAsignacion[];
   const isLoading = queryResult.isLoading;
+
+  const downloadBase64PDF = (base64: string, filename: string) => {
+    const link = document.createElement('a');
+    link.href = `data:application/pdf;base64,${base64}`;
+    link.download = filename;
+    link.click();
+  };
+
+  const generatePDFMutation = useMutation(
+    trpc.reporte.generatePDF.mutationOptions({
+      onSuccess: (data) => {
+        downloadBase64PDF(data.pdf, data.filename);
+      },
+      onError: () => alert('Error al generar el PDF'),
+    })
+  );
 
   const autoGenerateMutation = useMutation(
     trpc.horario.autoGenerate.mutationOptions({
@@ -132,37 +161,99 @@ export default function HorariosPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAutoModal(true)}
-            disabled={!periodoActivo}
-            className="rounded-lg border border-indigo-500/40 bg-indigo-600/10 px-4 py-2.5 text-sm font-medium text-indigo-300 hover:bg-indigo-600/20 disabled:opacity-50"
-          >
-            Autogenerar
-          </button>
-          <Link
-            href="/sesiones"
-            className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 shadow-lg shadow-indigo-500/25"
-          >
-            Ir a Sesiones de Llenado
-          </Link>
+          {viewMode === 'mi-horario' && (
+            <button
+              onClick={() => {
+                if (!periodoActivo || !user?.docenteId) return;
+                generatePDFMutation.mutate({
+                  periodoId: periodoActivo.id,
+                  tipo: 'por-docente',
+                });
+              }}
+              disabled={generatePDFMutation.isPending}
+              className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-600/10 px-4 py-2.5 text-sm font-medium text-emerald-300 hover:bg-emerald-600/20 disabled:opacity-50"
+            >
+              <FileDown className="h-4 w-4" /> {generatePDFMutation.isPending ? 'Generando...' : 'Descargar PDF'}
+            </button>
+          )}
+          {isAdmin && (
+            <>
+              <button
+                onClick={() => setShowAutoModal(true)}
+                disabled={!periodoActivo}
+                className="rounded-lg border border-indigo-500/40 bg-indigo-600/10 px-4 py-2.5 text-sm font-medium text-indigo-300 hover:bg-indigo-600/20 disabled:opacity-50"
+              >
+                Autogenerar
+              </button>
+              <Link
+                href="/sesiones"
+                className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 shadow-lg shadow-indigo-500/25"
+              >
+                Ir a Sesiones de Llenado
+              </Link>
+            </>
+          )}
         </div>
       </div>
 
       {/* View Mode Tabs */}
       <div className="flex gap-1 rounded-lg bg-gray-800 p-1 mb-4">
+        {isDocente && (
+          <button onClick={() => { setViewMode('mi-horario'); setSelectedAulaId(null); setSelectedDocenteId(null); }}
+            className={`flex-1 flex items-center justify-center gap-1 rounded-md px-4 py-2 text-sm font-medium transition-all ${viewMode === 'mi-horario' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-gray-400 hover:text-gray-200'}`}>
+            <Calendar className="h-3.5 w-3.5" /> Mi Horario
+          </button>
+        )}
         <button onClick={() => { setViewMode('general'); setSelectedAulaId(null); setSelectedDocenteId(null); }}
-          className={`flex-1 rounded-md px-4 py-2 text-sm font-medium ${viewMode === 'general' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+          className={`flex-1 rounded-md px-4 py-2 text-sm font-medium transition-all ${viewMode === 'general' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
           General
         </button>
         <button onClick={() => setViewMode('aula')}
-          className={`flex-1 flex items-center justify-center gap-1 rounded-md px-4 py-2 text-sm font-medium ${viewMode === 'aula' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+          className={`flex-1 flex items-center justify-center gap-1 rounded-md px-4 py-2 text-sm font-medium transition-all ${viewMode === 'aula' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
           <Building2 className="h-3.5 w-3.5" /> Por Aula
         </button>
         <button onClick={() => setViewMode('docente')}
-          className={`flex-1 flex items-center justify-center gap-1 rounded-md px-4 py-2 text-sm font-medium ${viewMode === 'docente' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+          className={`flex-1 flex items-center justify-center gap-1 rounded-md px-4 py-2 text-sm font-medium transition-all ${viewMode === 'docente' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
           <User className="h-3.5 w-3.5" /> Por Docente
         </button>
       </div>
+
+      {/* Docente Info Header for "Mi Horario" */}
+      {viewMode === 'mi-horario' && personalStats && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div className="p-4 rounded-xl bg-gray-900 border border-gray-800 flex items-center gap-4">
+            <div className="h-10 w-10 rounded-full bg-indigo-600/20 flex items-center justify-center text-indigo-400 font-bold">
+              {personalStats.docente.nombre.charAt(0)}
+            </div>
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-bold">Docente</p>
+              <p className="text-sm text-white font-bold">{personalStats.docente.nombre}</p>
+            </div>
+          </div>
+          <div className="p-4 rounded-xl bg-gray-900 border border-gray-800">
+            <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Carga Horaria</p>
+            <div className="flex items-center gap-2">
+              <span className={`text-lg font-bold ${personalStats.workload >= personalStats.limits.min ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {personalStats.workload}h
+              </span>
+              <span className="text-xs text-gray-600">/ {personalStats.limits.max}h max</span>
+            </div>
+          </div>
+          <div className="p-4 rounded-xl bg-gray-900 border border-gray-800">
+            <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Categoría / Tipo</p>
+            <p className="text-sm text-gray-200 font-semibold">{personalStats.docente.categoria} · {personalStats.docente.tipo}</p>
+          </div>
+          <div className="p-4 rounded-xl bg-gray-900 border border-gray-800 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Cursos</p>
+              <p className="text-sm text-gray-200 font-semibold">{personalStats.coursesCount} asignados</p>
+            </div>
+            {personalStats.workload >= personalStats.limits.min && (
+              <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Entity Selector */}
       {viewMode === 'aula' && (
@@ -223,33 +314,85 @@ export default function HorariosPage() {
               </tr>
             </thead>
             <tbody>
-              {horas.map((hora) => (
+              {horas.map((hora, rowIndex) => (
                 <tr key={hora} className="border-b border-gray-800/50">
                   <td className="sticky left-0 bg-gray-900 px-3 py-1.5 font-mono text-gray-500">{hora}</td>
                   {DIAS.map((dia) => {
                     const slotAsignaciones = asignaciones.filter(
                       (a) => a.franjaHoraria.dia === dia && a.franjaHoraria.horaInicio === hora
                     );
+                    
+                    if (slotAsignaciones.length === 0) return <td key={dia} className="px-1 py-1" />;
+
+                    // Simplified unification: only for single-assignment slots (non-conflicting)
+                    if (slotAsignaciones.length === 1) {
+                      const a = slotAsignaciones[0];
+                      const prevHora = horas[rowIndex - 1];
+                      const prevAsignaciones = prevHora ? asignaciones.filter(
+                        (pa) => pa.franjaHoraria.dia === dia && pa.franjaHoraria.horaInicio === prevHora
+                      ) : [];
+                      
+                      const isSameAsPrev = prevAsignaciones.length === 1 && 
+                        prevAsignaciones[0].grupo.curso.codigo === a.grupo.curso.codigo &&
+                        prevAsignaciones[0].grupo.nombre === a.grupo.nombre &&
+                        prevAsignaciones[0].aula?.codigo === a.aula?.codigo;
+
+                      if (isSameAsPrev) return null;
+
+                      // Calculate rowSpan
+                      let rowSpan = 1;
+                      for (let i = rowIndex + 1; i < horas.length; i++) {
+                        const nextHora = horas[i];
+                        const nextAsignaciones = asignaciones.filter(
+                          (na) => na.franjaHoraria.dia === dia && na.franjaHoraria.horaInicio === nextHora
+                        );
+                        if (nextAsignaciones.length === 1 && 
+                            nextAsignaciones[0].grupo.curso.codigo === a.grupo.curso.codigo &&
+                            nextAsignaciones[0].grupo.nombre === a.grupo.nombre &&
+                            nextAsignaciones[0].aula?.codigo === a.aula?.codigo) {
+                          rowSpan++;
+                        } else {
+                          break;
+                        }
+                      }
+
+                      const key = (a.grupo.cursoId ?? a.grupo.curso.id ?? a.id) as string;
+                      return (
+                        <td key={dia} className="px-1 py-1" rowSpan={rowSpan}>
+                          <div
+                            className={`rounded-md border p-2 h-full min-h-[45px] transition-all flex flex-col justify-center ${cursoColorMap.get(key)}`}
+                          >
+                            <p className="font-bold text-[11px] leading-tight">{a.grupo.curso.codigo}</p>
+                            <p className="text-[10px] font-medium opacity-90 truncate mt-0.5">{a.grupo.curso.nombre}</p>
+                            <div className="mt-1 pt-1 border-t border-white/10 flex flex-wrap gap-x-2 gap-y-0.5">
+                              {viewMode !== 'docente' && a.docente && (
+                                <p className="text-[9px] opacity-75 font-medium">
+                                  {a.docente.nombre.split(' ').slice(0, 2).join(' ')}
+                                </p>
+                              )}
+                              {viewMode !== 'aula' && a.aula && (
+                                <p className="text-[9px] opacity-75 font-medium">
+                                  {a.aula.codigo}
+                                </p>
+                              )}
+                              <p className="text-[9px] opacity-75 font-bold">G{a.grupo.nombre}</p>
+                              <p className="text-[9px] opacity-90 font-black text-white/50">{a.tipo}</p>
+                            </div>
+                          </div>
+                        </td>
+                      );
+                    }
+
+                    // Conflict case (multiple assignments in same slot)
                     return (
                       <td key={dia} className="px-1 py-1">
-                        {slotAsignaciones.map((a) => {
-                          const key = (a.grupo.cursoId ?? a.grupo.curso.id ?? a.id) as string;
-                          return (
-                            <div key={a.id} className={`rounded-md border p-1.5 mb-0.5 ${cursoColorMap.get(key)}`}>
-                              <p className="font-semibold truncate">{a.grupo.curso.codigo}</p>
-                              {'docente' in a && (a as { docente?: { nombre: string } }).docente && (
-                                <p className="text-[10px] opacity-70 truncate">
-                                  {(a as { docente: { nombre: string } }).docente.nombre.split(' ').slice(0, 2).join(' ')}
-                                </p>
-                              )}
-                              {'aula' in a && (a as { aula?: { codigo: string } }).aula && (
-                                <p className="text-[10px] opacity-50">
-                                  {(a as { aula: { codigo: string } }).aula.codigo} · G{(a as { grupo: { nombre: string } }).grupo.nombre}
-                                </p>
-                              )}
+                        <div className="bg-red-500/20 border border-red-500/30 rounded-md p-1">
+                          {slotAsignaciones.map((a) => (
+                            <div key={a.id} className="text-[9px] text-red-300 border-b border-red-500/10 last:border-0 py-0.5">
+                              {a.grupo.curso.codigo} - G{a.grupo.nombre}
                             </div>
-                          );
-                        })}
+                          ))}
+                        </div>
                       </td>
                     );
                   })}

@@ -9,9 +9,15 @@ const globalForPrisma = globalThis as unknown as {
 };
 
 function createPrismaClient() {
+  console.log('Initializing new PrismaClient...');
   const pool = new pg.Pool({ connectionString });
   const adapter = new PrismaPg(pool);
   return new PrismaClient({ adapter });
+}
+
+// Forzar recreación si estamos en desarrollo para evitar caché stale
+if (process.env.NODE_ENV === 'development') {
+  globalForPrisma.prisma = undefined;
 }
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();

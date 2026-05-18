@@ -1,5 +1,5 @@
-import { z } from 'zod/v4';
-import { createTRPCRouter, baseProcedure } from '../init';
+import { z } from 'zod';
+import { createTRPCRouter, baseProcedure, adminProcedure } from '../init';
 
 const periodoInput = z.object({
   nombre: z.string().min(3, 'El nombre es obligatorio (ej: 2026-I)'),
@@ -38,36 +38,34 @@ export const periodoRouter = createTRPCRouter({
       });
     }),
 
-  create: baseProcedure
-    .input(periodoInput)
+  create: adminProcedure.input(periodoInput).mutation(({ ctx, input }) => {
+    return ctx.prisma.periodoAcademico.create({ data: input });
+  }),
+
+  update: adminProcedure
+    .input(z.object({ id: z.string() }).merge(periodoInput))
+    .mutation(({ ctx, input }) => {
+      const { id, ...data } = input;
+      return ctx.prisma.periodoAcademico.update({ where: { id }, data });
+    }),
+
+  delete: adminProcedure.input(z.object({ id: z.string() })).mutation(({ ctx, input }) => {
+    return ctx.prisma.periodoAcademico.delete({ where: { id: input.id } });
+  }),
+
+  toggleActive: adminProcedure
+    .input(z.object({ id: z.string(), activo: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
-      // If setting as active, deactivate all others
       if (input.activo) {
         await ctx.prisma.periodoAcademico.updateMany({
           where: { activo: true },
           data: { activo: false },
         });
       }
-      return ctx.prisma.periodoAcademico.create({ data: input });
-    }),
-
-  update: baseProcedure
-    .input(z.object({ id: z.string() }).extend(periodoInput.partial().shape))
-    .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
-      if (data.activo) {
-        await ctx.prisma.periodoAcademico.updateMany({
-          where: { activo: true, id: { not: id } },
-          data: { activo: false },
-        });
-      }
-      return ctx.prisma.periodoAcademico.update({ where: { id }, data });
-    }),
-
-  delete: baseProcedure
-    .input(z.object({ id: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.periodoAcademico.delete({ where: { id: input.id } });
+      return ctx.prisma.periodoAcademico.update({
+        where: { id: input.id },
+        data: { activo: input.activo },
+      });
     }),
 
   // ── Franjas Horarias ──────────────────────────

@@ -109,7 +109,7 @@ export class AvailabilityService {
     aulaId: string,
     docenteId: string
   ): Promise<AulaAvailability> {
-    const [aulaAvail, docenteAsignaciones, restricciones] = await Promise.all([
+    const [aulaAvail, docenteAsignaciones, restricciones, disponibilidadCount] = await Promise.all([
       this.getAulaAvailability(periodoId, aulaId),
       this.prisma.asignacion.findMany({
         where: { docenteId, periodoId },
@@ -119,7 +119,21 @@ export class AvailabilityService {
         where: { docenteId },
         select: { franjaHorariaId: true },
       }),
+      this.prisma.disponibilidadDocente.count({
+        where: { docenteId },
+      }),
     ]);
+
+    const hasAvailabilityDefined = disponibilidadCount > 0;
+    let registeredDisponibilidad = new Set<string>();
+    
+    if (hasAvailabilityDefined) {
+      const disp = await this.prisma.disponibilidadDocente.findMany({
+        where: { docenteId },
+        select: { franjaHorariaId: true },
+      });
+      registeredDisponibilidad = new Set(disp.map(d => d.franjaHorariaId));
+    }
 
     // Build lookup sets
     const docenteOccupiedFranjas = new Set(
@@ -142,6 +156,11 @@ export class AvailabilityService {
     aulaAvail.slots = aulaAvail.slots.map((slot) => {
       // Already occupied or in maintenance — keep original status
       if (slot.status !== 'LIBRE') return slot;
+
+      // Check if docente is available (only if they registered availability)
+      if (hasAvailabilityDefined && !registeredDisponibilidad.has(slot.franjaId)) {
+        return { ...slot, status: 'RESTRICCION_DOCENTE' as SlotStatus };
+      }
 
       // Docente has restriction on this franja
       if (restriccionFranjas.has(slot.franjaId)) {
@@ -180,12 +199,11 @@ export class AvailabilityService {
     aulaId: string,
     grupoId: string,
     franjaId: string,
-    periodoId: string,
-    tipo: 'TEORIA' | 'LABORATORIO'
+    periodoId: string
   ): Promise<ValidationResult> {
     const reasons: string[] = [];
 
-    const [franja, existingAsignaciones, docenteAsignaciones, restricciones, mantenimiento] =
+    const [franja, existingAsignaciones, docenteAsignaciones, restricciones, mantenimiento, disponibilidadCount] =
       await Promise.all([
         this.prisma.franjaHoraria.findUniqueOrThrow({ where: { id: franjaId } }),
         // Check aula + grupo occupancy for this franja
@@ -207,7 +225,20 @@ export class AvailabilityService {
         this.prisma.mantenimientoAula.findFirst({
           where: { aulaId, franjaHorariaId: franjaId },
         }),
+        this.prisma.disponibilidadDocente.count({
+          where: { docenteId },
+        }),
       ]);
+
+    // 0. Docente availability? (Requirement 4.3: Default to full availability if none registered)
+    if (disponibilidadCount > 0) {
+      const hasSpecificAvailability = await this.prisma.disponibilidadDocente.findFirst({
+        where: { docenteId, franjaHorariaId: franjaId },
+      });
+      if (!hasSpecificAvailability) {
+        reasons.push('Usted no ha marcado esta franja como disponible');
+      }
+    }
 
     // 1. Aula already booked?
     if (existingAsignaciones.some((a) => a.aulaId === aulaId)) {
@@ -253,5 +284,51 @@ export class AvailabilityService {
       valid: reasons.length === 0,
       reasons,
     };
+  }
+
+  /**
+   * Suggests an aula for a group based on cycle consistency.
+   * "Tratando de que los cursos de un solo ciclo se lleven en la misma aula"
+   */
+  async suggestAulaForGroup(
+    grupoId: string,
+    periodoId: string,
+    tipo: 'TEORIA' | 'PRACTICA' | 'LABORATORIO'
+  ): Promise<string | null> {
+    const grupo = await this.prisma.grupo.findUniqueOrThrow({
+      where: { id: grupoId },
+      include: { curso: true },
+    });
+
+    // For laboratories, the user said they are "plena elección del docente" 
+    // but the system can suggest one.
+    if (tipo === 'LABORATORIO') {
+       // Just suggest the first available lab
+       const lab = await this.prisma.aula.findFirst({
+         where: { tipo: 'LABORATORIO' },
+       });
+       return lab?.id || null;
+    }
+
+    // For theory/practice, try to match the cycle
+    const otherAssignmentSameCycle = await this.prisma.asignacion.findFirst({
+      where: {
+        periodoId,
+        tipo: { in: ['TEORIA', 'PRACTICA'] },
+        grupo: {
+          curso: { ciclo: grupo.curso.ciclo },
+          id: { not: grupoId },
+        },
+      },
+      select: { aulaId: true },
+    });
+
+    if (otherAssignmentSameCycle) return otherAssignmentSameCycle.aulaId;
+
+    // Default: suggest first theory aula
+    const defaultAula = await this.prisma.aula.findFirst({
+      where: { tipo: 'TEORIA' },
+    });
+    return defaultAula?.id || null;
   }
 }

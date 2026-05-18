@@ -1,11 +1,12 @@
-import { z } from 'zod/v4';
-import { createTRPCRouter, baseProcedure } from '../init';
+import { z } from 'zod';
+import { createTRPCRouter, baseProcedure, adminProcedure, representanteProcedure, protectedProcedure } from '../init';
 import { sortDocentesByHierarchy } from '@/server/services/schedule-engine/hierarchy';
 import type { DocenteForSchedule } from '@/server/services/schedule-engine/types';
+import { TRPCError } from '@trpc/server';
 
 export const sesionRouter = createTRPCRouter({
   /** Create a filling session with auto-generated turns */
-  create: baseProcedure
+  create: representanteProcedure
     .input(z.object({
       periodoId: z.string(),
       nombre: z.string(),
@@ -18,23 +19,19 @@ export const sesionRouter = createTRPCRouter({
       // Get all active docentes and sort by hierarchy
       const docentesRaw = await ctx.prisma.docente.findMany({
         where: { activo: true },
-        orderBy: [{ tipo: 'asc' }, { categoria: 'asc' }, { antiguedad: 'asc' }],
       });
 
-      const docentesMapped: DocenteForSchedule[] = docentesRaw.map((d) => ({
+      const docentes: DocenteForSchedule[] = docentesRaw.map((d) => ({
         id: d.id,
         nombre: d.nombre,
-        tipo: d.tipo,
         categoria: d.categoria,
+        tipo: d.tipo,
         antiguedad: d.antiguedad,
       }));
 
-      const sorted = sortDocentesByHierarchy(docentesMapped);
+      const sortedDocentes = sortDocentesByHierarchy(docentes);
 
-      // Generate time slots for turns
-      const turnSlots = generateTurnSlots(input.horaInicio, input.horaFin, input.intervalo);
-
-      // Create session with turns
+      // Create session
       const sesion = await ctx.prisma.sesionLlenado.create({
         data: {
           periodoId: input.periodoId,
@@ -43,26 +40,35 @@ export const sesionRouter = createTRPCRouter({
           horaInicio: input.horaInicio,
           horaFin: input.horaFin,
           intervalo: input.intervalo,
-          turnos: {
-            create: sorted.map((docente, i) => ({
-              docenteId: docente.id,
-              orden: i + 1,
-              horaAsignada: turnSlots[i] ?? turnSlots[turnSlots.length - 1],
-            })),
-          },
         },
-        include: {
-          turnos: {
-            include: { docente: true },
-            orderBy: { orden: 'asc' },
-          },
-        },
+      });
+
+      // Create turns
+      const turnsData = sortedDocentes.map((d, index) => {
+        const minutes = index * input.intervalo;
+        const startTotalMinutes =
+          parseInt(input.horaInicio.split(':')[0]) * 60 +
+          parseInt(input.horaInicio.split(':')[1]);
+        const turnMinutes = startTotalMinutes + minutes;
+        const hours = Math.floor(turnMinutes / 60);
+        const mins = turnMinutes % 60;
+        const horaAsignada = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+
+        return {
+          sesionId: sesion.id,
+          docenteId: d.id,
+          orden: index + 1,
+          horaAsignada,
+        };
+      });
+
+      await ctx.prisma.turnoDocente.createMany({
+        data: turnsData,
       });
 
       return sesion;
     }),
 
-  /** List sessions for a periodo */
   list: baseProcedure
     .input(z.object({ periodoId: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -71,11 +77,167 @@ export const sesionRouter = createTRPCRouter({
         include: {
           _count: { select: { turnos: true } },
         },
-        orderBy: { fecha: 'asc' },
+        orderBy: { fecha: 'desc' },
       });
     }),
 
-  /** Get full session state with all turns */
+  byId: baseProcedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ ctx, input }) => {
+      return ctx.prisma.sesionLlenado.findUniqueOrThrow({
+        where: { id: input.id },
+        include: {
+          turnos: {
+            include: { docente: true },
+            orderBy: { orden: 'asc' },
+          },
+        },
+      });
+    }),
+
+  updateStatus: representanteProcedure
+    .input(z.object({ id: z.string(), estado: z.enum(['PROGRAMADA', 'EN_CURSO', 'FINALIZADA']) }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.sesionLlenado.update({
+        where: { id: input.id },
+        data: { estado: input.estado },
+      });
+    }),
+
+  updateTurnoActual: representanteProcedure
+    .input(z.object({ id: z.string(), turnoActual: z.number().int() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.sesionLlenado.update({
+        where: { id: input.id },
+        data: { turnoActual: input.turnoActual },
+      });
+    }),
+
+  delete: representanteProcedure.input(z.object({ id: z.string() })).mutation(async ({ ctx, input }) => {
+    return ctx.prisma.sesionLlenado.delete({ where: { id: input.id } });
+  }),
+
+  /** Get the currently active session and the docente in turn */
+  active: baseProcedure
+    .input(z.object({ periodoId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const sesion = await ctx.prisma.sesionLlenado.findFirst({
+        where: { periodoId: input.periodoId, estado: 'EN_CURSO' },
+        include: {
+          turnos: {
+            orderBy: { orden: 'asc' },
+          },
+        },
+      });
+
+      if (!sesion) return null;
+
+      const turnoActual = sesion.turnos.find(t => t.orden === sesion.turnoActual);
+      return {
+        ...sesion,
+        turnoActualDocenteId: turnoActual?.docenteId || null,
+      };
+    }),
+
+  iniciar: representanteProcedure
+    .input(z.object({ sesionId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const sesion = await ctx.prisma.sesionLlenado.update({
+        where: { id: input.sesionId },
+        data: { estado: 'EN_CURSO', turnoActual: 1 },
+        include: { turnos: { where: { orden: 1 } } }
+      });
+
+      // Notify first docente
+      const firstTurn = sesion.turnos[0];
+      if (firstTurn) {
+        await ctx.prisma.notification.create({
+          data: {
+            docenteId: firstTurn.docenteId,
+            titulo: '¡Es tu turno!',
+            mensaje: `La sesión "${sesion.nombre}" ha iniciado. Es tu turno para seleccionar tu horario.`,
+            tipo: 'TURN_START',
+            link: `/sesiones/${sesion.id}`
+          }
+        });
+        
+        await ctx.prisma.turnoDocente.update({
+          where: { id: firstTurn.id },
+          data: { estado: 'EN_TURNO' }
+        });
+      }
+
+      return sesion;
+    }),
+
+  /** Docente finishes their turn */
+  finalizarTurno: protectedProcedure
+    .input(z.object({ sesionId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (!ctx.session?.docenteId) throw new TRPCError({ code: 'UNAUTHORIZED' });
+
+      const sesion = await ctx.prisma.sesionLlenado.findUniqueOrThrow({
+        where: { id: input.sesionId },
+        include: { 
+          turnos: { 
+            orderBy: { orden: 'asc' } 
+          } 
+        }
+      });
+
+      const currentTurn = sesion.turnos.find(t => t.orden === sesion.turnoActual);
+      
+      if (!currentTurn || currentTurn.docenteId !== ctx.session.docenteId) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'No es tu turno o el turno ya pasó.'
+        });
+      }
+
+      // Mark current as completed
+      await ctx.prisma.turnoDocente.update({
+        where: { id: currentTurn.id },
+        data: { estado: 'COMPLETADO' }
+      });
+
+      // Advance session
+      if (sesion.turnoActual >= sesion.turnos.length) {
+        await ctx.prisma.sesionLlenado.update({
+          where: { id: input.sesionId },
+          data: { estado: 'FINALIZADA' }
+        });
+        return { finished: true };
+      }
+
+      const nextOrden = sesion.turnoActual + 1;
+      await ctx.prisma.sesionLlenado.update({
+        where: { id: input.sesionId },
+        data: { turnoActual: nextOrden }
+      });
+
+      // Notify next docente
+      const nextTurn = sesion.turnos.find(t => t.orden === nextOrden);
+      if (nextTurn) {
+        await ctx.prisma.notification.create({
+          data: {
+            docenteId: nextTurn.docenteId,
+            titulo: '¡Es tu turno!',
+            mensaje: `El docente anterior ha finalizado. Ahora es tu turno en la sesión "${sesion.nombre}".`,
+            tipo: 'TURN_START',
+            link: `/sesiones/${sesion.id}`
+          }
+        });
+
+        await ctx.prisma.turnoDocente.update({
+          where: { id: nextTurn.id },
+          data: { estado: 'EN_TURNO' }
+        });
+      }
+
+      return { finished: false, nextOrden };
+    }),
+
+  /** Get full state of a session including turns and current progress */
   estado: baseProcedure
     .input(z.object({ sesionId: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -83,172 +245,132 @@ export const sesionRouter = createTRPCRouter({
         where: { id: input.sesionId },
         include: {
           turnos: {
-            include: {
-              docente: {
-                select: { id: true, nombre: true, tipo: true, categoria: true },
-              },
-            },
+            include: { docente: true },
             orderBy: { orden: 'asc' },
           },
         },
       });
 
-      const turnoActual = sesion.turnos.find((t) => t.estado === 'EN_TURNO');
-      const siguientes = sesion.turnos.filter((t) => t.estado === 'PENDIENTE');
+      const total = sesion.turnos.length;
       const completados = sesion.turnos.filter((t) => t.estado === 'COMPLETADO');
+      const ausentes = sesion.turnos.filter((t) => t.estado === 'AUSENTE').length;
+      
+      const turnoActual = sesion.turnos.find((t) => t.orden === sesion.turnoActual);
+      const siguientes = sesion.turnos.filter((t) => t.orden > sesion.turnoActual && t.estado === 'PENDIENTE');
 
       return {
         ...sesion,
         turnoActual,
-        siguientes,
         completados,
+        siguientes,
         progreso: {
-          total: sesion.turnos.length,
+          total,
           completados: completados.length,
-          porcentaje: Math.round((completados.length / sesion.turnos.length) * 100),
+          ausentes,
+          porcentaje: total > 0 ? Math.round((completados.length / total) * 100) : 0,
         },
       };
     }),
 
-  /** Start the session (set first turn to EN_TURNO) */
-  iniciar: baseProcedure
+  /** Advance to next turn in session (Admin only) */
+  avanzarTurno: representanteProcedure
     .input(z.object({ sesionId: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const primerTurno = await ctx.prisma.turnoDocente.findFirst({
-        where: { sesionId: input.sesionId, estado: 'PENDIENTE' },
-        orderBy: { orden: 'asc' },
+      const sesion = await ctx.prisma.sesionLlenado.findUniqueOrThrow({
+        where: { id: input.sesionId },
+        include: { turnos: { orderBy: { orden: 'asc' } } }
       });
 
-      if (!primerTurno) {
-        return { success: false, reason: 'No hay turnos pendientes' };
-      }
-
-      await ctx.prisma.$transaction([
-        ctx.prisma.sesionLlenado.update({
-          where: { id: input.sesionId },
-          data: { estado: 'EN_CURSO', turnoActual: primerTurno.orden },
-        }),
-        ctx.prisma.turnoDocente.update({
-          where: { id: primerTurno.id },
-          data: { estado: 'EN_TURNO' },
-        }),
-      ]);
-
-      return { success: true, turnoId: primerTurno.id };
-    }),
-
-  /** Advance to the next turn (mark current as COMPLETADO, next as EN_TURNO) */
-  avanzarTurno: baseProcedure
-    .input(z.object({ sesionId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      const turnoActual = await ctx.prisma.turnoDocente.findFirst({
-        where: { sesionId: input.sesionId, estado: 'EN_TURNO' },
-      });
-
-      if (!turnoActual) {
-        return { success: false, reason: 'No hay turno activo' };
-      }
-
-      const siguienteTurno = await ctx.prisma.turnoDocente.findFirst({
-        where: {
-          sesionId: input.sesionId,
-          estado: 'PENDIENTE',
-          orden: { gt: turnoActual.orden },
-        },
-        orderBy: { orden: 'asc' },
-      });
-
-      const operations = [
-        ctx.prisma.turnoDocente.update({
-          where: { id: turnoActual.id },
-          data: { estado: 'COMPLETADO' },
-        }),
-      ];
-
-      if (siguienteTurno) {
-        operations.push(
-          ctx.prisma.turnoDocente.update({
-            where: { id: siguienteTurno.id },
-            data: { estado: 'EN_TURNO' },
-          })
-        );
-        operations.push(
-          ctx.prisma.sesionLlenado.update({
-            where: { id: input.sesionId },
-            data: { turnoActual: siguienteTurno.orden },
-          })
-        );
-      } else {
-        // No more turns — session finished
-        operations.push(
-          ctx.prisma.sesionLlenado.update({
-            where: { id: input.sesionId },
-            data: { estado: 'FINALIZADA' },
-          })
-        );
-      }
-
-      await ctx.prisma.$transaction(operations);
-
-      return {
-        success: true,
-        finished: !siguienteTurno,
-        nextTurnoId: siguienteTurno?.id,
-      };
-    }),
-
-  /** Mark a docente as absent (skip their turn) */
-  marcarAusente: baseProcedure
-    .input(z.object({ turnoId: z.string(), sesionId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await ctx.prisma.turnoDocente.update({
-        where: { id: input.turnoId },
-        data: { estado: 'AUSENTE' },
-      });
-
-      // Advance to next
-      const siguiente = await ctx.prisma.turnoDocente.findFirst({
-        where: { sesionId: input.sesionId, estado: 'PENDIENTE' },
-        orderBy: { orden: 'asc' },
-      });
-
-      if (siguiente) {
-        await ctx.prisma.$transaction([
-          ctx.prisma.turnoDocente.update({
-            where: { id: siguiente.id },
-            data: { estado: 'EN_TURNO' },
-          }),
-          ctx.prisma.sesionLlenado.update({
-            where: { id: input.sesionId },
-            data: { turnoActual: siguiente.orden },
-          }),
-        ]);
-      } else {
-        await ctx.prisma.sesionLlenado.update({
-          where: { id: input.sesionId },
-          data: { estado: 'FINALIZADA' },
+      const currentTurn = sesion.turnos.find(t => t.orden === sesion.turnoActual);
+      if (currentTurn && currentTurn.estado === 'EN_TURNO') {
+        await ctx.prisma.turnoDocente.update({
+          where: { id: currentTurn.id },
+          data: { estado: 'COMPLETADO' }
         });
       }
 
-      return { success: true };
+      if (sesion.turnoActual >= sesion.turnos.length) {
+        return ctx.prisma.sesionLlenado.update({
+          where: { id: input.sesionId },
+          data: { estado: 'FINALIZADA' }
+        });
+      }
+
+      const nextOrden = sesion.turnoActual + 1;
+      const updatedSesion = await ctx.prisma.sesionLlenado.update({
+        where: { id: input.sesionId },
+        data: { turnoActual: nextOrden, estado: 'EN_CURSO' }
+      });
+
+      // Notify next docente
+      const nextTurn = sesion.turnos.find(t => t.orden === nextOrden);
+      if (nextTurn) {
+        await ctx.prisma.notification.create({
+          data: {
+            docenteId: nextTurn.docenteId,
+            titulo: '¡Es tu turno! (Asignado por Admin)',
+            mensaje: `El administrador ha avanzado el turno. Ahora es tu turno en la sesión "${sesion.nombre}".`,
+            tipo: 'TURN_START',
+            link: `/sesiones/${sesion.id}`
+          }
+        });
+
+        await ctx.prisma.turnoDocente.update({
+          where: { id: nextTurn.id },
+          data: { estado: 'EN_TURNO' }
+        });
+      }
+
+      return updatedSesion;
+    }),
+
+  /** Mark a docente as absent (Admin only) */
+  marcarAusente: representanteProcedure
+    .input(z.object({ sesionId: z.string(), turnoId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const turnToMark = await ctx.prisma.turnoDocente.update({
+        where: { id: input.turnoId },
+        data: { estado: 'AUSENTE' }
+      });
+      
+      const sesion = await ctx.prisma.sesionLlenado.findUniqueOrThrow({
+        where: { id: input.sesionId },
+        include: { turnos: { orderBy: { orden: 'asc' } } }
+      });
+
+      // If we marked the current turn as absent, advance
+      if (sesion.turnoActual === turnToMark.orden) {
+        if (sesion.turnoActual < sesion.turnos.length) {
+          const nextOrden = sesion.turnoActual + 1;
+          await ctx.prisma.sesionLlenado.update({
+            where: { id: input.sesionId },
+            data: { turnoActual: nextOrden }
+          });
+
+          // Notify next docente
+          const nextTurn = sesion.turnos.find(t => t.orden === nextOrden);
+          if (nextTurn) {
+            await ctx.prisma.notification.create({
+              data: {
+                docenteId: nextTurn.docenteId,
+                titulo: '¡Es tu turno!',
+                mensaje: `El docente anterior fue marcado como ausente. Ahora es tu turno en la sesión "${sesion.nombre}".`,
+                tipo: 'TURN_START',
+                link: `/sesiones/${sesion.id}`
+              }
+            });
+
+            await ctx.prisma.turnoDocente.update({
+              where: { id: nextTurn.id },
+              data: { estado: 'EN_TURNO' }
+            });
+          }
+        } else {
+          await ctx.prisma.sesionLlenado.update({
+            where: { id: input.sesionId },
+            data: { estado: 'FINALIZADA' }
+          });
+        }
+      }
     }),
 });
-
-/** Generate turn time slots: "08:00", "08:15", "08:30"... */
-function generateTurnSlots(horaInicio: string, horaFin: string, intervaloMin: number): string[] {
-  const slots: string[] = [];
-  const [startH, startM] = horaInicio.split(':').map(Number);
-  const [endH, endM] = horaFin.split(':').map(Number);
-
-  let totalMinutes = startH * 60 + startM;
-  const endMinutes = endH * 60 + endM;
-
-  while (totalMinutes < endMinutes) {
-    const h = Math.floor(totalMinutes / 60);
-    const m = totalMinutes % 60;
-    slots.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
-    totalMinutes += intervaloMin;
-  }
-
-  return slots;
-}

@@ -11,7 +11,7 @@ export default function PeriodosPage() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ nombre: '', fechaInicio: '', fechaFin: '', activo: false });
 
-  const { data: periodos = [], isLoading } = useQuery(trpc.periodo.list.queryOptions());
+  const { data: periodos = [], isLoading } = useQuery({ ...trpc.periodo.list.queryOptions() });
 
   const createMutation = useMutation(
     trpc.periodo.create.mutationOptions({
@@ -19,9 +19,12 @@ export default function PeriodosPage() {
     })
   );
 
-  const updateMutation = useMutation(
-    trpc.periodo.update.mutationOptions({
-      onSuccess: () => { queryClient.invalidateQueries({ queryKey: trpc.periodo.list.queryKey() }); },
+  const toggleMutation = useMutation(
+    trpc.periodo.toggleActive.mutationOptions({
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: trpc.periodo.list.queryKey() });
+        queryClient.invalidateQueries({ queryKey: trpc.periodo.active.queryKey() });
+      },
     })
   );
 
@@ -69,7 +72,7 @@ export default function PeriodosPage() {
                 </div>
                 <div className="flex gap-2">
                   {!p.activo && (
-                    <button onClick={() => updateMutation.mutate({ id: p.id, activo: true })}
+                    <button onClick={() => toggleMutation.mutate({ id: p.id, activo: true })}
                       className="rounded-lg border border-emerald-500/30 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-500/10">
                       Activar
                     </button>

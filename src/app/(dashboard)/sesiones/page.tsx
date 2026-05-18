@@ -20,13 +20,11 @@ export default function SesionesPage() {
     nombre: '', fecha: '', horaInicio: '08:00', horaFin: '13:00', intervalo: 15,
   });
 
-  const { data: periodoActivo } = useQuery(trpc.periodo.active.queryOptions());
-  const { data: sesiones = [], isLoading } = useQuery(
-    trpc.sesion.list.queryOptions(
-      { periodoId: periodoActivo?.id ?? '' },
-      { enabled: !!periodoActivo?.id }
-    )
-  );
+  const { data: periodoActivo } = useQuery({ ...trpc.periodo.active.queryOptions() });
+  const { data: sesiones = [], isLoading } = useQuery({
+    ...trpc.sesion.list.queryOptions({ periodoId: periodoActivo?.id ?? '' }),
+    enabled: !!periodoActivo?.id,
+  });
 
   const createMutation = useMutation(
     trpc.sesion.create.mutationOptions({

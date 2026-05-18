@@ -1,7 +1,9 @@
-import { z } from 'zod/v4';
-import { createTRPCRouter, baseProcedure } from '../init';
+import { z } from 'zod';
+import { createTRPCRouter, baseProcedure, adminProcedure, protectedProcedure, representanteProcedure } from '../init';
+import { TRPCError } from '@trpc/server';
 import { AvailabilityService } from '@/server/services/availability';
 import { ScheduleEngine } from '@/server/services/schedule-engine';
+import { AssignmentService } from '@/server/services/assignment.service';
 
 export const horarioRouter = createTRPCRouter({
   // ─── Availability (Real-time) ────────────────────────
@@ -22,265 +24,8 @@ export const horarioRouter = createTRPCRouter({
       return service.getDocenteAulaAvailability(input.periodoId, input.aulaId, input.docenteId);
     }),
 
-  /** All aulas of a type with their availability */
-  aulasAvailabilityByTipo: baseProcedure
-    .input(z.object({ periodoId: z.string(), tipo: z.enum(['TEORIA', 'LABORATORIO']) }))
-    .query(async ({ ctx, input }) => {
-      const service = new AvailabilityService(ctx.prisma);
-      return service.getAulasAvailabilityByTipo(input.periodoId, input.tipo);
-    }),
+  // ─── Assignments ───────────────────────────────────
 
-  // ─── Slot Selection (Docente picks a slot) ──────────
-
-  /** Validate + assign a slot. Returns validation result. */
-  selectSlot: baseProcedure
-    .input(z.object({
-      docenteId: z.string(),
-      grupoId: z.string(),
-      aulaId: z.string(),
-      franjaHorariaId: z.string(),
-      periodoId: z.string(),
-      tipo: z.enum(['TEORIA', 'LABORATORIO']),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const service = new AvailabilityService(ctx.prisma);
-
-      // Validate against all constraints
-      const validation = await service.validateSlotSelection(
-        input.docenteId,
-        input.aulaId,
-        input.grupoId,
-        input.franjaHorariaId,
-        input.periodoId,
-        input.tipo
-      );
-
-      if (!validation.valid) {
-        return { success: false, reasons: validation.reasons };
-      }
-
-      // Create the assignment
-      await ctx.prisma.asignacion.create({
-        data: {
-          docenteId: input.docenteId,
-          grupoId: input.grupoId,
-          aulaId: input.aulaId,
-          franjaHorariaId: input.franjaHorariaId,
-          periodoId: input.periodoId,
-          tipo: input.tipo,
-          confirmado: false,
-        },
-      });
-
-      return { success: true, reasons: [] };
-    }),
-
-  /** Remove a slot (docente changes their mind before confirming) */
-  releaseSlot: baseProcedure
-    .input(z.object({ asignacionId: z.string(), docenteId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      // Only allow releasing non-confirmed assignments owned by this docente
-      const asignacion = await ctx.prisma.asignacion.findUnique({
-        where: { id: input.asignacionId },
-      });
-
-      if (!asignacion) {
-        return { success: false, reason: 'Asignación no encontrada' };
-      }
-      if (asignacion.docenteId !== input.docenteId) {
-        return { success: false, reason: 'No puede liberar asignaciones de otro docente' };
-      }
-      if (asignacion.confirmado) {
-        return { success: false, reason: 'No puede liberar una asignación ya confirmada' };
-      }
-
-      await ctx.prisma.asignacion.delete({ where: { id: input.asignacionId } });
-      return { success: true };
-    }),
-
-  /** Confirm all pending assignments for a docente */
-  confirmSchedule: baseProcedure
-    .input(z.object({ docenteId: z.string(), periodoId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      const result = await ctx.prisma.asignacion.updateMany({
-        where: {
-          docenteId: input.docenteId,
-          periodoId: input.periodoId,
-          confirmado: false,
-        },
-        data: { confirmado: true },
-      });
-
-      return { confirmed: result.count };
-    }),
-
-  // ─── Auto Scheduling (Batch) ───────────────────────
-
-  /** Auto-generate schedule for an entire periodo using hierarchy rules */
-  autoGenerate: baseProcedure
-    .input(z.object({
-      periodoId: z.string(),
-      overwrite: z.boolean().optional().default(true),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const periodo = await ctx.prisma.periodoAcademico.findUnique({
-        where: { id: input.periodoId },
-      });
-
-      if (!periodo) {
-        return { success: false, reason: 'Periodo no encontrado' };
-      }
-
-      const existingCount = await ctx.prisma.asignacion.count({
-        where: { periodoId: input.periodoId },
-      });
-
-      if (existingCount > 0 && !input.overwrite) {
-        return {
-          success: false,
-          reason: `Ya existen ${existingCount} asignaciones en este periodo. Use overwrite para regenerar.`,
-        };
-      }
-
-      const [docentes, grupos, aulas, franjas, docenteGrupos, restricciones, mantenimientos, preasignaciones, existingAssignments] =
-        await Promise.all([
-          ctx.prisma.docente.findMany({
-            where: { activo: true },
-            select: { id: true, nombre: true, categoria: true, tipo: true, antiguedad: true },
-          }),
-          ctx.prisma.grupo.findMany({
-            where: { periodoAcademicoId: input.periodoId },
-            include: { curso: true },
-          }),
-          ctx.prisma.aula.findMany(),
-          ctx.prisma.franjaHoraria.findMany({
-            orderBy: [{ dia: 'asc' }, { numeroBloque: 'asc' }],
-          }),
-          ctx.prisma.docenteGrupo.findMany({
-            where: { grupo: { periodoAcademicoId: input.periodoId } },
-            select: { docenteId: true, grupoId: true },
-          }),
-          ctx.prisma.restriccionDocente.findMany({
-            select: { docenteId: true, franjaHorariaId: true },
-          }),
-          ctx.prisma.mantenimientoAula.findMany({
-            where: {
-              fecha: {
-                gte: periodo.fechaInicio,
-                lte: periodo.fechaFin,
-              },
-            },
-            select: { aulaId: true, franjaHorariaId: true },
-          }),
-          ctx.prisma.preasignacion.findMany({
-            where: { periodoId: input.periodoId },
-            select: { docenteId: true, grupoId: true, aulaId: true, franjaHorariaId: true, tipo: true },
-          }),
-          input.overwrite
-            ? Promise.resolve([])
-            : ctx.prisma.asignacion.findMany({
-              where: { periodoId: input.periodoId },
-              select: { grupoId: true, docenteId: true, aulaId: true, franjaHorariaId: true, tipo: true },
-            }),
-        ]);
-
-      const docenteGrupoMap = new Map<string, string[]>();
-      docenteGrupos.forEach((dg) => {
-        const list = docenteGrupoMap.get(dg.docenteId) ?? [];
-        list.push(dg.grupoId);
-        docenteGrupoMap.set(dg.docenteId, list);
-      });
-
-      const blockedDocenteSlots = new Set(
-        restricciones.map((r) => `${r.docenteId}::${r.franjaHorariaId}`)
-      );
-      const blockedAulaSlots = new Set(
-        mantenimientos.map((m) => `${m.aulaId}::${m.franjaHorariaId}`)
-      );
-
-      const fixedAssignments = [
-        ...preasignaciones,
-        ...existingAssignments,
-      ];
-
-      const engine = new ScheduleEngine({
-        docentes: docentes.map((d) => ({
-          id: d.id,
-          nombre: d.nombre,
-          categoria: d.categoria,
-          tipo: d.tipo,
-          antiguedad: d.antiguedad,
-        })),
-        grupos: grupos.map((g) => ({
-          id: g.id,
-          nombre: g.nombre,
-          cursoId: g.cursoId,
-          cursoNombre: g.curso.nombre,
-          cursoCodigo: g.curso.codigo,
-          horasTeoria: g.curso.horasTeoria,
-          horasLaboratorio: g.curso.horasLaboratorio,
-          requiereLaboratorio: g.curso.requiereLaboratorio,
-        })),
-        aulas: aulas.map((a) => ({
-          id: a.id,
-          codigo: a.codigo,
-          nombre: a.nombre,
-          capacidad: a.capacidad,
-          tipo: a.tipo,
-        })),
-        franjas: franjas.map((f) => ({
-          id: f.id,
-          dia: f.dia,
-          horaInicio: f.horaInicio,
-          horaFin: f.horaFin,
-          numeroBloque: f.numeroBloque,
-        })),
-        docenteGrupoMap,
-        existingAssignments: fixedAssignments,
-        blockedDocenteSlots,
-        blockedAulaSlots,
-      });
-
-      const result = engine.generate();
-
-      const createData = result.assignments.map((a) => ({
-        docenteId: a.docenteId,
-        grupoId: a.grupoId,
-        aulaId: a.aulaId,
-        franjaHorariaId: a.franjaHorariaId,
-        periodoId: input.periodoId,
-        tipo: a.tipo,
-        confirmado: false,
-      }));
-
-      await ctx.prisma.$transaction(async (tx) => {
-        if (input.overwrite && existingCount > 0) {
-          await tx.asignacion.deleteMany({
-            where: { periodoId: input.periodoId },
-          });
-        }
-
-        if (createData.length > 0) {
-          await tx.asignacion.createMany({
-            data: createData,
-            skipDuplicates: true,
-          });
-        }
-      });
-
-      return {
-        success: true,
-        periodo: periodo.nombre,
-        createdCount: result.assignments.length,
-        unassignedCount: result.unassigned.length,
-        conflictsAvoided: result.stats.conflictsAvoided,
-        unassigned: result.unassigned,
-      };
-    }),
-
-  // ─── Queries (Read) ──────────────────────────────────
-
-  /** List all assignments for a periodo */
   list: baseProcedure
     .input(z.object({ periodoId: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -292,32 +37,9 @@ export const horarioRouter = createTRPCRouter({
           aula: true,
           franjaHoraria: true,
         },
-        orderBy: [
-          { franjaHoraria: { dia: 'asc' } },
-          { franjaHoraria: { numeroBloque: 'asc' } },
-        ],
       });
     }),
 
-  /** Docente's own schedule for current filling session */
-  byDocente: baseProcedure
-    .input(z.object({ docenteId: z.string(), periodoId: z.string() }))
-    .query(async ({ ctx, input }) => {
-      return ctx.prisma.asignacion.findMany({
-        where: { docenteId: input.docenteId, periodoId: input.periodoId },
-        include: {
-          grupo: { include: { curso: true } },
-          aula: true,
-          franjaHoraria: true,
-        },
-        orderBy: [
-          { franjaHoraria: { dia: 'asc' } },
-          { franjaHoraria: { numeroBloque: 'asc' } },
-        ],
-      });
-    }),
-
-  /** Schedule by aula (for reports) */
   byAula: baseProcedure
     .input(z.object({ aulaId: z.string(), periodoId: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -326,66 +48,294 @@ export const horarioRouter = createTRPCRouter({
         include: {
           grupo: { include: { curso: true } },
           docente: true,
+          aula: true,
           franjaHoraria: true,
         },
-        orderBy: [
-          { franjaHoraria: { dia: 'asc' } },
-          { franjaHoraria: { numeroBloque: 'asc' } },
-        ],
       });
     }),
 
-  /** Clear all assignments for a periodo */
-  clear: baseProcedure
-    .input(z.object({ periodoId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      const deleted = await ctx.prisma.asignacion.deleteMany({
-        where: { periodoId: input.periodoId },
+  byDocente: baseProcedure
+    .input(z.object({ docenteId: z.string(), periodoId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      return ctx.prisma.asignacion.findMany({
+        where: { docenteId: input.docenteId, periodoId: input.periodoId },
+        include: {
+          grupo: { include: { curso: true } },
+          aula: true,
+          docente: true,
+          franjaHoraria: true,
+        },
       });
-      return { deletedCount: deleted.count };
     }),
 
-  // ─── Dashboard Stats ────────────────────────────────
-
+  /** Stats for dashboard/management */
   stats: baseProcedure
     .input(z.object({ periodoId: z.string() }))
     .query(async ({ ctx, input }) => {
-      const [totalGrupos, asignaciones, docentes] = await Promise.all([
-        ctx.prisma.grupo.count({
-          where: { periodoAcademicoId: input.periodoId },
-        }),
+      const [asignaciones, grupos, docentesConCargaCount] = await Promise.all([
         ctx.prisma.asignacion.findMany({
           where: { periodoId: input.periodoId },
-          select: { docenteId: true, grupoId: true, tipo: true, confirmado: true },
+          include: { docente: true },
         }),
-        ctx.prisma.docente.findMany({
-          where: { activo: true },
-          select: { id: true, nombre: true, categoria: true, tipo: true },
+        ctx.prisma.grupo.findMany({
+          where: { periodoAcademicoId: input.periodoId },
+        }),
+        ctx.prisma.asignacion.groupBy({
+          by: ['docenteId'],
+          where: { periodoId: input.periodoId },
         }),
       ]);
 
-      const gruposAsignados = new Set(asignaciones.map((a) => a.grupoId)).size;
-      const docentesConCarga = new Set(asignaciones.map((a) => a.docenteId)).size;
-      const confirmadas = asignaciones.filter((a) => a.confirmado).length;
+      const totalAsignaciones = asignaciones.length;
+      const totalGrupos = grupos.length;
 
-      const cargaDocente = docentes.map((d) => {
-        const horasAsignadas = asignaciones.filter((a) => a.docenteId === d.id).length;
-        return {
-          id: d.id, nombre: d.nombre, categoria: d.categoria,
-          tipo: d.tipo, horasAsignadas,
-        };
+      // Unique groups that have at least one assignment
+      const assignedGroupIds = new Set(asignaciones.map((a) => a.grupoId));
+      const gruposAsignados = assignedGroupIds.size;
+      const gruposSinAsignar = totalGrupos - gruposAsignados;
+
+      const docenteCarga = new Map<string, { nombre: string; horasAsignadas: number }>();
+
+      asignaciones.forEach((a) => {
+        const d = a.docente;
+        const current = docenteCarga.get(d.id) || { nombre: d.nombre, horasAsignadas: 0 };
+        docenteCarga.set(d.id, { ...current, horasAsignadas: current.horasAsignadas + 1 });
       });
 
       return {
+        totalAsignaciones,
         totalGrupos,
         gruposAsignados,
-        gruposSinAsignar: totalGrupos - gruposAsignados,
-        totalDocentes: docentes.length,
-        docentesConCarga,
-        docentesSinCarga: docentes.length - docentesConCarga,
-        totalAsignaciones: asignaciones.length,
-        asignacionesConfirmadas: confirmadas,
-        cargaDocente,
+        gruposSinAsignar,
+        docentesConCarga: docentesConCargaCount.length,
+        cargaDocente: Array.from(docenteCarga.values()),
       };
+    }),
+
+  /** Create a single assignment (from filling session or admin) */
+  create: protectedProcedure
+    .input(z.object({
+      docenteId: z.string(),
+      aulaId: z.string(),
+      grupoId: z.string(),
+      franjaHorariaId: z.string(),
+      periodoId: z.string(),
+      tipo: z.enum(['TEORIA', 'PRACTICA', 'LABORATORIO']),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const service = new AvailabilityService(ctx.prisma);
+
+      // Validate against all constraints
+      const validation = await service.validateSlotSelection(
+        input.docenteId,
+        input.aulaId,
+        input.grupoId,
+        input.franjaHorariaId,
+        input.periodoId
+      );
+
+      if (!validation.valid) {
+        throw new Error(validation.reasons.join(', '));
+      }
+
+      return ctx.prisma.asignacion.create({
+        data: {
+          docenteId: input.docenteId,
+          aulaId: input.aulaId,
+          grupoId: input.grupoId,
+          franjaHorariaId: input.franjaHorariaId,
+          periodoId: input.periodoId,
+          tipo: input.tipo,
+        },
+      });
+    }),
+
+  delete: adminProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.asignacion.delete({ where: { id: input.id } });
+    }),
+
+  // ─── Auto Scheduling (Batch) ───────────────────────
+
+  autoGenerate: adminProcedure
+    .input(z.object({
+      periodoId: z.string(),
+      overwrite: z.boolean().optional().default(true),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      // 1. Fetch all data needed for the engine
+      const [docentes, grupos, aulas, franjas, docenteGrupos, restricciones, mantenimientos] = await Promise.all([
+        ctx.prisma.docente.findMany({ where: { activo: true } }),
+        ctx.prisma.grupo.findMany({ 
+          where: { periodoAcademicoId: input.periodoId },
+          include: { curso: true }
+        }),
+        ctx.prisma.aula.findMany(),
+        ctx.prisma.franjaHoraria.findMany(),
+        ctx.prisma.docenteGrupo.findMany({
+          where: { grupo: { periodoAcademicoId: input.periodoId } }
+        }),
+        ctx.prisma.restriccionDocente.findMany(),
+        ctx.prisma.mantenimientoAula.findMany()
+      ]);
+
+      const docenteGrupoMap = new Map<string, string[]>();
+      docenteGrupos.forEach(dg => {
+        const current = docenteGrupoMap.get(dg.docenteId) || [];
+        docenteGrupoMap.set(dg.docenteId, [...current, dg.grupoId]);
+      });
+
+      const engineInput = {
+        docentes: docentes.map(d => ({
+          id: d.id,
+          nombre: d.nombre,
+          categoria: d.categoria,
+          tipo: d.tipo,
+          antiguedad: d.antiguedad
+        })),
+        grupos: grupos.map(g => ({
+          id: g.id,
+          nombre: g.nombre,
+          cursoId: g.cursoId,
+          cursoNombre: g.curso.nombre,
+          cursoCodigo: g.curso.codigo,
+          horasTeoria: g.curso.horasTeoria,
+          horasLaboratorio: g.curso.horasLaboratorio,
+          requiereLaboratorio: g.curso.requiereLaboratorio
+        })),
+        aulas: aulas.map(a => ({
+          id: a.id,
+          codigo: a.codigo,
+          nombre: a.nombre,
+          capacidad: a.capacidad,
+          tipo: a.tipo
+        })),
+        franjas: franjas.map(f => ({
+          id: f.id,
+          dia: f.dia,
+          horaInicio: f.horaInicio,
+          horaFin: f.horaFin,
+          numeroBloque: f.numeroBloque
+        })),
+        docenteGrupoMap,
+        blockedDocenteSlots: new Set(restricciones.map(r => `${r.docenteId}-${r.franjaHorariaId}`)),
+        blockedAulaSlots: new Set(mantenimientos.map(m => `${m.aulaId}-${m.franjaHorariaId}`))
+      };
+
+      const engine = new ScheduleEngine(engineInput);
+      const result = engine.generate();
+
+      // 2. Persist assignments if requested
+      if (input.overwrite) {
+        await ctx.prisma.asignacion.deleteMany({
+          where: { periodoId: input.periodoId }
+        });
+      }
+
+      const createdCount = await ctx.prisma.$transaction(
+        result.assignments.map(a => 
+          ctx.prisma.asignacion.create({
+            data: {
+              ...a,
+              periodoId: input.periodoId
+            }
+          })
+        )
+      );
+
+      return {
+        success: true,
+        reason: undefined as string | undefined,
+        createdCount: createdCount.length,
+        unassignedCount: result.unassigned.length,
+        unassigned: result.unassigned
+      };
+    }),
+
+  /** Run automatic assignment based on postulations and hierarchy */
+  processAssignments: protectedProcedure
+    .input(z.object({ periodoId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (ctx.session.role !== 'REPRESENTANTE_ESCUELA' && ctx.session.role !== 'ADMIN') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+      const service = new AssignmentService(ctx.prisma);
+      return service.processPostulations(input.periodoId);
+    }),
+
+  /** Select a slot for a group/docente/aula (Session filling) */
+  selectSlot: baseProcedure
+    .input(z.object({
+      docenteId: z.string(),
+      aulaId: z.string(),
+      grupoId: z.string(),
+      franjaHorariaId: z.string(),
+      periodoId: z.string(),
+      tipo: z.enum(['TEORIA', 'PRACTICA', 'LABORATORIO']),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const service = new AvailabilityService(ctx.prisma);
+      const validation = await service.validateSlotSelection(
+        input.docenteId,
+        input.aulaId,
+        input.grupoId,
+        input.franjaHorariaId,
+        input.periodoId
+      );
+
+      if (!validation.valid) {
+        return { success: false, reasons: validation.reasons };
+      }
+
+      await ctx.prisma.asignacion.create({
+        data: {
+          docenteId: input.docenteId,
+          aulaId: input.aulaId,
+          grupoId: input.grupoId,
+          franjaHorariaId: input.franjaHorariaId,
+          periodoId: input.periodoId,
+          tipo: input.tipo,
+        },
+      });
+
+      return { success: true, reasons: [] };
+    }),
+
+  /** Release an assigned slot */
+  releaseSlot: baseProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.asignacion.delete({ where: { id: input.id } });
+    }),
+
+  /** Suggest an aula based on business rules */
+  suggestAula: protectedProcedure
+    .input(z.object({ grupoId: z.string(), periodoId: z.string(), tipo: z.enum(['TEORIA', 'LABORATORIO']) }))
+    .query(async ({ ctx, input }) => {
+      const service = new AvailabilityService(ctx.prisma);
+      return service.suggestAulaForGroup(input.grupoId, input.periodoId, input.tipo);
+    }),
+
+  /** Confirm schedule for a docente (marks turn as completed) */
+  confirmSchedule: baseProcedure
+    .input(z.object({ docenteId: z.string(), periodoId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      // Find current active turn for this docente
+      const turn = await ctx.prisma.turnoDocente.findFirst({
+        where: {
+          docenteId: input.docenteId,
+          sesion: { estado: 'EN_CURSO' }
+        },
+      });
+
+      if (turn) {
+        await ctx.prisma.turnoDocente.update({
+          where: { id: turn.id },
+          data: { estado: 'COMPLETADO' }
+        });
+      }
+
+      return { success: true };
     }),
 });

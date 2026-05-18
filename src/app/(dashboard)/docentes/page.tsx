@@ -12,11 +12,16 @@ type FormData = {
   tipo: 'NOMBRADO' | 'CONTRATADO';
   antiguedad: string;
   activo: boolean;
+  gradoAcademico: string;
+  especialidad: string;
+  experienciaAnios: number;
+  perfilAcademico: string;
 };
 
 const emptyForm: FormData = {
   nombre: '', email: '', categoria: 'AUXILIAR',
   tipo: 'CONTRATADO', antiguedad: '', activo: true,
+  gradoAcademico: '', especialidad: '', experienciaAnios: 0, perfilAcademico: '',
 };
 
 const CATEGORIA_LABELS: Record<string, string> = {
@@ -37,9 +42,12 @@ export default function DocentesPage() {
   const [form, setForm] = useState<FormData>(emptyForm);
   const [search, setSearch] = useState('');
 
-  const { data: docentes = [], isLoading } = useQuery(
-    trpc.docente.list.queryOptions({ search: search || undefined })
-  );
+  const { data: user } = useQuery({ ...trpc.auth.me.queryOptions() });
+  const isAdmin = user?.role === 'ADMIN';
+
+  const { data: docentes = [], isLoading } = useQuery({
+    ...trpc.docente.list.queryOptions({ search: search || undefined })
+  });
 
   const createMutation = useMutation(
     trpc.docente.create.mutationOptions({
@@ -76,8 +84,16 @@ export default function DocentesPage() {
   function openEdit(d: (typeof docentes)[0]) {
     setEditId(d.id);
     setForm({
-      nombre: d.nombre, email: d.email, categoria: d.categoria,
-      tipo: d.tipo, antiguedad: d.antiguedad.toString().slice(0, 10), activo: d.activo,
+      nombre: d.nombre,
+      email: d.email,
+      categoria: d.categoria,
+      tipo: d.tipo,
+      antiguedad: d.antiguedad.toString().slice(0, 10),
+      activo: d.activo,
+      gradoAcademico: d.gradoAcademico || '',
+      especialidad: d.especialidad || '',
+      experienciaAnios: d.experienciaAnios || 0,
+      perfilAcademico: d.perfilAcademico || '',
     });
     setShowModal(true);
   }
@@ -102,12 +118,17 @@ export default function DocentesPage() {
             {docentes.length} docentes registrados
           </p>
         </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 active:bg-indigo-700 shadow-lg shadow-indigo-500/25"
-        >
-          <Plus className="h-4 w-4" /> Nuevo Docente
-        </button>
+        <div className="flex items-center gap-3">
+          {isAdmin && (
+            <button
+              onClick={() => setShowModal(true)}
+              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-indigo-500 shadow-lg shadow-indigo-500/25"
+            >
+              <Plus className="h-4 w-4" />
+              Nuevo Docente
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Search */}
@@ -156,12 +177,18 @@ export default function DocentesPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
-                      <button onClick={() => openEdit(d)} className="rounded-md p-1.5 text-gray-500 hover:bg-gray-700 hover:text-gray-300">
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button onClick={() => deleteMutation.mutate({ id: d.id })} className="rounded-md p-1.5 text-gray-500 hover:bg-red-900/30 hover:text-red-400">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {isAdmin ? (
+                        <>
+                          <button onClick={() => openEdit(d)} className="rounded-md p-1.5 text-gray-500 hover:bg-gray-700 hover:text-gray-300">
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button onClick={() => deleteMutation.mutate({ id: d.id })} className="rounded-md p-1.5 text-gray-500 hover:bg-red-900/30 hover:text-red-400">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-gray-600 font-medium">Solo lectura</span>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -214,6 +241,29 @@ export default function DocentesPage() {
                     <option value="JEFE_PRACTICA">Jefe de Práctica</option>
                   </select>
                 </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-400 mb-1">Grado Académico</label>
+                  <input type="text" value={form.gradoAcademico} onChange={(e) => setForm({ ...form, gradoAcademico: e.target.value })}
+                    className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-400 mb-1">Especialidad</label>
+                  <input type="text" value={form.especialidad} onChange={(e) => setForm({ ...form, especialidad: e.target.value })}
+                    className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-400 mb-1">Experiencia (años)</label>
+                <input type="number" value={form.experienciaAnios} onChange={(e) => setForm({ ...form, experienciaAnios: parseInt(e.target.value) || 0 })}
+                  className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-400 mb-1">Perfil Académico (Keywords)</label>
+                <textarea value={form.perfilAcademico} onChange={(e) => setForm({ ...form, perfilAcademico: e.target.value })}
+                  placeholder="Ej: software bases de datos inteligencia artificial react node"
+                  className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none h-20" />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-400 mb-1">Fecha de Antigüedad</label>

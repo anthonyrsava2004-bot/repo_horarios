@@ -8,13 +8,14 @@ import {
   Clock, User, BookOpen, Building2, FlaskConical,
 } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 const STATUS_COLORS: Record<string, string> = {
   LIBRE: 'bg-emerald-600/30 border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/50 cursor-pointer',
   OCUPADO: 'bg-red-600/20 border-red-500/30 text-red-400',
   MANTENIMIENTO: 'bg-orange-600/20 border-orange-500/30 text-orange-400',
   FERIADO: 'bg-gray-600/20 border-gray-500/30 text-gray-400',
-  DOCENTE_OCUPADO: 'bg-amber-600/20 border-amber-500/30 text-amber-400',
+  DOCENTE_OCUPADO: 'bg-red-600/40 border-red-500/60 text-red-200 shadow-inner shadow-red-500/20',
   ALMUERZO_REQUERIDO: 'bg-yellow-600/20 border-yellow-500/30 text-yellow-400',
   MAX_HORAS_EXCEDIDO: 'bg-purple-600/20 border-purple-500/30 text-purple-400',
   RESTRICCION_DOCENTE: 'bg-pink-600/20 border-pink-500/30 text-pink-400',
@@ -36,9 +37,10 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
   const { id: sesionId } = use(params);
   const trpc = useTRPC();
   const queryClient = useQueryClient();
+  const router = useRouter();
 
   const [selectedAulaId, setSelectedAulaId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'TEORIA' | 'LABORATORIO'>('TEORIA');
+  const [activeTab, setActiveTab] = useState<'TEORIA' | 'PRACTICA' | 'LABORATORIO'>('TEORIA');
   const [selectedGrupoId, setSelectedGrupoId] = useState<string | null>(null);
 
   // ─── Queries ────────────────────────────────────────
@@ -48,18 +50,18 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
     refetchInterval: 3000, // Polling every 3s for real-time updates
   });
 
-  const { data: periodoActivo } = useQuery(trpc.periodo.active.queryOptions());
+  const { data: periodoActivo } = useQuery({ ...trpc.periodo.active.queryOptions() });
 
   const docenteEnTurno = sesion?.turnoActual?.docente;
 
-  // Get docente's assigned groups
-  const { data: docenteGrupos = [] } = useQuery({
+  const { data: docenteGruposData } = useQuery({
     ...trpc.docente.grupos.queryOptions({ docenteId: docenteEnTurno?.id ?? '' }),
     enabled: !!docenteEnTurno?.id,
   });
+  const docenteGrupos = (docenteGruposData as any[]) || [];
 
   // Get availability for selected aula (annotated with docente constraints)
-  const { data: aulaAvailability } = useQuery({
+  const { data: aulaAvailabilityData } = useQuery({
     ...trpc.horario.docenteAulaAvailability.queryOptions({
       periodoId: periodoActivo?.id ?? '',
       aulaId: selectedAulaId ?? '',
@@ -68,12 +70,28 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
     enabled: !!periodoActivo?.id && !!selectedAulaId && !!docenteEnTurno?.id,
     refetchInterval: 3000,
   });
+  const aulaAvailability = (aulaAvailabilityData as any);
 
   // Get all aulas of current type for selection
   const { data: aulasDisponibles = [] } = useQuery({
-    ...trpc.aula.list.queryOptions({ tipo: activeTab }),
-    enabled: !!docenteEnTurno,
+    ...trpc.aula.list.queryOptions({ tipo: activeTab === 'LABORATORIO' ? 'LABORATORIO' : 'TEORIA' }),
+    enabled: !!docenteEnTurno?.id,
   });
+
+  // Suggest an aula when group changes
+  const { data: suggestedAulaId } = useQuery({
+    ...trpc.horario.suggestAula.queryOptions({ 
+      grupoId: selectedGrupoId ?? '', 
+      periodoId: periodoActivo?.id ?? '',
+      tipo: activeTab === 'LABORATORIO' ? 'LABORATORIO' : 'TEORIA'
+    }),
+    enabled: !!selectedGrupoId && !!periodoActivo?.id,
+  });
+
+  // Auto-select suggested aula
+  if (suggestedAulaId && !selectedAulaId) {
+    setSelectedAulaId(suggestedAulaId);
+  }
 
   // Get docente's current assignments
   const { data: docenteAsignaciones = [] } = useQuery({
@@ -104,9 +122,20 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
     })
   );
 
+  const finalizarTurnoMutation = useMutation(
+    trpc.sesion.finalizarTurno.mutationOptions({
+      onSuccess: () => {
+        router.push('/');
+      },
+    })
+  );
+
   const confirmMutation = useMutation(
     trpc.horario.confirmSchedule.mutationOptions({
-      onSuccess: () => invalidateAll(),
+      onSuccess: () => {
+        alert('Horario confirmado exitosamente. Se ha notificado al siguiente docente.');
+        finalizarTurnoMutation.mutate({ sesionId } as any);
+      },
     })
   );
 
@@ -138,8 +167,14 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
 
   // ─── Derived Data ──────────────────────────────────
 
+  const totalHorasRequeridas = docenteGrupos.reduce((acc: number, dg: any) => 
+    acc + dg.grupo.curso.horasTeoria + dg.grupo.curso.horasLaboratorio, 0
+  );
+  const totalHorasAsignadas = docenteAsignaciones.length;
+  const faltanHoras = totalHorasRequeridas - totalHorasAsignadas;
+
   const horas = aulaAvailability
-    ? [...new Set(aulaAvailability.slots.map((s) => s.horaInicio))].sort()
+    ? [...new Set((aulaAvailability as any).slots.map((s: any) => s.horaInicio))].sort()
     : [];
 
   const handleSlotClick = (franjaId: string) => {
@@ -209,9 +244,17 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                   <div>
                     <p className="text-xs text-emerald-500 uppercase tracking-wider font-medium">Turno #{sesion.turnoActual?.orden}</p>
                     <p className="font-semibold text-white">{docenteEnTurno.nombre}</p>
-                    <p className="text-xs text-gray-400">
-                      {docenteEnTurno.tipo} · {docenteEnTurno.categoria}
-                    </p>
+                    <div className="flex items-center gap-4 mt-1">
+                      <p className="text-xs text-gray-400">
+                        {docenteEnTurno.tipo} · {docenteEnTurno.categoria}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <span className={`h-1.5 w-1.5 rounded-full ${faltanHoras === 0 ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                        <p className={`text-xs font-bold ${faltanHoras === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          Carga: {totalHorasAsignadas}/{totalHorasRequeridas}h
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -268,7 +311,7 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
               )}
             </div>
 
-            {/* Tab: Teoría / Laboratorio */}
+            {/* Tab: Teoría / Práctica / Laboratorio */}
             <div className="flex gap-1 rounded-lg bg-gray-800 p-1">
               <button
                 onClick={() => { setActiveTab('TEORIA'); setSelectedAulaId(null); }}
@@ -278,7 +321,17 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                     : 'text-gray-400 hover:text-gray-200'
                 }`}
               >
-                <Building2 className="h-4 w-4" /> Aulas de Teoría
+                <Building2 className="h-4 w-4" /> Teoría
+              </button>
+              <button
+                onClick={() => { setActiveTab('PRACTICA'); setSelectedAulaId(null); }}
+                className={`flex-1 flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all ${
+                  activeTab === 'PRACTICA'
+                    ? 'bg-cyan-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                <BookOpen className="h-4 w-4" /> Práctica
               </button>
               <button
                 onClick={() => { setActiveTab('LABORATORIO'); setSelectedAulaId(null); }}
@@ -288,7 +341,7 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                     : 'text-gray-400 hover:text-gray-200'
                 }`}
               >
-                <FlaskConical className="h-4 w-4" /> Laboratorios
+                <FlaskConical className="h-4 w-4" /> Laboratorio
               </button>
             </div>
 
@@ -332,21 +385,54 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                       </tr>
                     </thead>
                     <tbody>
-                      {horas.map((hora) => (
+                      {horas.map((hora: any, rowIndex) => (
                         <tr key={hora} className="border-b border-gray-800/50">
                           <td className="sticky left-0 bg-gray-900 px-3 py-1 font-mono text-gray-500">{hora}</td>
                           {DIAS.map((dia) => {
-                            const slot = aulaAvailability.slots.find(
-                              (s) => s.dia === dia && s.horaInicio === hora
+                            const slot = (aulaAvailability as any).slots.find(
+                              (s: any) => s.dia === dia && s.horaInicio === hora
                             );
                             if (!slot) return <td key={dia} />;
 
+                            // Check for unified blocks (consecutive occupied slots by same entity)
+                            // This is complex for a standard table. Let's simplify:
+                            // We only skip rendering if the PREVIOUS slot (above) was same.
+                            const prevHora = horas[rowIndex - 1];
+                            const prevSlot = prevHora ? (aulaAvailability as any).slots.find(
+                              (s: any) => s.dia === dia && s.horaInicio === prevHora
+                            ) : null;
+
+                            const isSameAsPrev = slot.status === 'OCUPADO' && 
+                              prevSlot?.status === 'OCUPADO' && 
+                              slot.ocupadoPor?.cursoCodigo === prevSlot.ocupadoPor?.cursoCodigo &&
+                              slot.ocupadoPor?.grupoNombre === prevSlot.ocupadoPor?.grupoNombre;
+
+                            if (isSameAsPrev) return null; // Skip rendering this cell
+
+                            // Calculate rowSpan
+                            let rowSpan = 1;
+                            if (slot.status === 'OCUPADO') {
+                              for (let i = rowIndex + 1; i < horas.length; i++) {
+                                const nextHora = horas[i];
+                                const nextSlot = (aulaAvailability as any).slots.find(
+                                  (s: any) => s.dia === dia && s.horaInicio === nextHora
+                                );
+                                if (nextSlot?.status === 'OCUPADO' && 
+                                    nextSlot.ocupadoPor?.cursoCodigo === slot.ocupadoPor.cursoCodigo &&
+                                    nextSlot.ocupadoPor?.grupoNombre === slot.ocupadoPor.grupoNombre) {
+                                  rowSpan++;
+                                } else {
+                                  break;
+                                }
+                              }
+                            }
+
                             return (
-                              <td key={dia} className="px-1 py-1">
+                              <td key={dia} className="px-1 py-1" rowSpan={rowSpan}>
                                 <button
                                   disabled={slot.status !== 'LIBRE' || !selectedGrupoId}
                                   onClick={() => slot.status === 'LIBRE' && handleSlotClick(slot.franjaId)}
-                                  className={`w-full rounded-md border p-1.5 text-center text-[10px] transition-all ${
+                                  className={`w-full h-full rounded-md border p-1.5 text-center text-[10px] transition-all flex flex-col items-center justify-center min-h-[40px] ${
                                     STATUS_COLORS[slot.status] ?? 'bg-gray-800 border-gray-700 text-gray-500'
                                   } ${slot.status !== 'LIBRE' || !selectedGrupoId ? 'cursor-not-allowed' : ''}`}
                                   title={slot.status !== 'LIBRE'
@@ -357,10 +443,15 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                                   {slot.status === 'LIBRE' ? (
                                     STATUS_ICONS.LIBRE
                                   ) : (
-                                    <div>
-                                      <span>{STATUS_ICONS[slot.status]}</span>
+                                    <div className="w-full">
+                                      <span className="text-xs">{STATUS_ICONS[slot.status]}</span>
                                       {slot.ocupadoPor && (
-                                        <p className="truncate mt-0.5">{slot.ocupadoPor.cursoCodigo}</p>
+                                        <div className="mt-1">
+                                          <p className="font-bold text-[9px] leading-tight uppercase">{slot.ocupadoPor.cursoCodigo}</p>
+                                          {rowSpan > 1 && (
+                                            <p className="text-[8px] opacity-75 truncate">{slot.ocupadoPor.cursoNombre}</p>
+                                          )}
+                                        </div>
                                       )}
                                     </div>
                                   )}
@@ -421,8 +512,7 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
                       {!a.confirmado && (
                         <button
                           onClick={() => releaseSlotMutation.mutate({
-                            asignacionId: a.id,
-                            docenteId: docenteEnTurno?.id ?? '',
+                            id: a.id,
                           })}
                           className="text-red-400 hover:text-red-300 text-[10px]"
                         >
@@ -439,36 +529,36 @@ export default function SesionDetailPage({ params }: { params: Promise<{ id: str
             <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
               <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
                 <Clock className="inline h-3 w-3 -mt-0.5 mr-1" />
-                Cola ({sesion.siguientes.length} pendientes)
+                Cola ({(sesion?.siguientes as any[])?.length || 0} pendientes)
               </h3>
               <div className="space-y-1 max-h-80 overflow-y-auto">
-                {sesion.siguientes.slice(0, 10).map((t) => (
-                  <div key={t.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs">
-                    <span className="w-5 text-right text-gray-600 font-mono">#{t.orden}</span>
-                    <span className="text-gray-500">{t.horaAsignada}</span>
-                    <span className="text-gray-300 truncate flex-1">{t.docente.nombre}</span>
-                    <span className="text-[10px] text-gray-600">{t.docente.categoria}</span>
+                {(sesion?.siguientes as any[])?.slice(0, 10).map((t: any) => (
+                  <div key={t.id} className="flex items-center justify-between p-2 rounded bg-gray-800/40 border border-gray-700/50">
+                    <span className="text-[11px] text-gray-300 truncate mr-2">{t.docente.nombre}</span>
+                    <span className="text-[10px] text-gray-500 shrink-0 font-mono">{t.horaAsignada}</span>
                   </div>
                 ))}
-                {sesion.siguientes.length > 10 && (
-                  <p className="text-[10px] text-gray-600 text-center pt-1">
-                    +{sesion.siguientes.length - 10} más
-                  </p>
+                {(sesion?.siguientes as any[])?.length > 10 && (
+                  <div className="text-center py-1">
+                    <span className="text-[10px] text-gray-600 font-medium">
+                      +{(sesion?.siguientes as any[]).length - 10} más
+                    </span>
+                  </div>
                 )}
               </div>
             </div>
 
             {/* Completed */}
-            <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+            <div className="rounded-xl border border-gray-800 bg-gray-900 p-4 opacity-75">
               <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
                 <CheckCircle className="inline h-3 w-3 -mt-0.5 mr-1" />
-                Completados ({sesion.completados.length})
+                Completados ({(sesion?.completados as any[])?.length || 0})
               </h3>
               <div className="space-y-1 max-h-40 overflow-y-auto">
-                {sesion.completados.map((t) => (
-                  <div key={t.id} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-gray-600">
-                    <CheckCircle className="h-3 w-3 text-emerald-600" />
-                    <span className="truncate">{t.docente.nombre}</span>
+                {(sesion?.completados as any[])?.map((t: any) => (
+                  <div key={t.id} className="flex items-center justify-between p-2 rounded bg-emerald-500/5 border border-emerald-500/10">
+                    <span className="text-[11px] text-emerald-300 truncate">{t.docente.nombre}</span>
+                    <CheckCircle className="h-2.5 w-2.5 text-emerald-500" />
                   </div>
                 ))}
               </div>

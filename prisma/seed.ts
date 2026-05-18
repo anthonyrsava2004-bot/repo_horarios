@@ -1,7 +1,8 @@
-require('dotenv/config');
-import { PrismaClient, CategoriaDocente, TipoDocente, TipoAula, DiaSemana } from '../src/generated/prisma/client';
+import 'dotenv/config';
+import { PrismaClient, CategoriaDocente, TipoDocente, TipoAula, DiaSemana, UserRole } from '../src/generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
+import bcrypt from 'bcryptjs';
 
 const connectionString = process.env.DATABASE_URL!;
 const pool = new pg.Pool({ connectionString });
@@ -10,6 +11,27 @@ const prisma = new PrismaClient({ adapter });
 
 async function main() {
   console.log('🌱 Seeding database...');
+
+  // Limpiar base de datos antes de sembrar (en orden inverso de relaciones)
+  await prisma.notification.deleteMany();
+  await prisma.log.deleteMany();
+  await prisma.user.deleteMany();
+  await prisma.turnoDocente.deleteMany();
+  await prisma.sesionLlenado.deleteMany();
+  await prisma.asignacion.deleteMany();
+  await prisma.preasignacion.deleteMany();
+  await prisma.restriccionDocente.deleteMany();
+  await prisma.mantenimientoAula.deleteMany();
+  await prisma.docenteGrupo.deleteMany();
+  await prisma.grupo.deleteMany();
+  await prisma.curso.deleteMany();
+  await prisma.aula.deleteMany();
+  await prisma.franjaHoraria.deleteMany();
+  await prisma.feriado.deleteMany();
+  await prisma.periodoAcademico.deleteMany();
+  await prisma.docente.deleteMany();
+
+  console.log('  🗑️  Base de datos limpiada');
 
   // ── Periodo Académico ──────────────────────────────
   const periodo = await prisma.periodoAcademico.create({
@@ -188,6 +210,50 @@ async function main() {
   await prisma.feriado.createMany({ data: feriadosData });
   console.log(`  ✅ ${feriadosData.length} feriados creados`);
 
+  // ── Usuarios de Prueba ──────────────────────────────
+  const hashedPassword = await bcrypt.hash('admin123', 10);
+  const docentePassword = await bcrypt.hash('docente123', 10);
+
+  const admin = await prisma.user.create({
+    data: {
+      email: 'admin@unt.edu.pe',
+      password: hashedPassword,
+      nombre: 'Administrador del Sistema',
+      role: UserRole.ADMIN,
+    },
+  });
+
+  const representante = await prisma.user.create({
+    data: {
+      email: 'escuela@unt.edu.pe',
+      password: hashedPassword,
+      nombre: 'Director de Escuela',
+      role: UserRole.REPRESENTANTE_ESCUELA,
+    },
+  });
+
+  const docenteUser = await prisma.user.create({
+    data: {
+      email: 'cmendez@unitru.edu.pe',
+      password: docentePassword,
+      nombre: 'Dr. Carlos Méndez Ruiz',
+      role: UserRole.DOCENTE,
+      docenteId: docentes[0].id,
+    },
+  });
+
+  const docenteUser2 = await prisma.user.create({
+    data: {
+      email: 'mlopez@unitru.edu.pe',
+      password: docentePassword,
+      nombre: 'Dra. María López Vega',
+      role: UserRole.DOCENTE,
+      docenteId: docentes[1].id,
+    },
+  });
+
+  console.log('  ✅ Usuarios de prueba creados (admin, 2 docentes)');
+
   // ── Summary ────────────────────────────────────────
   console.log('\n🎉 Seed completo!');
   console.log(`   Periodo: ${periodo.nombre}`);
@@ -198,6 +264,7 @@ async function main() {
   console.log(`   Grupos: ${gruposCreated.length}`);
   console.log(`   Docente-Grupo: ${docenteGrupoCount}`);
   console.log(`   Feriados: ${feriadosData.length}`);
+  console.log(`   Usuarios: 3 (admin@unt.edu.pe, cmendez@unitru.edu.pe, mlopez@unitru.edu.pe)`);
 }
 
 main()

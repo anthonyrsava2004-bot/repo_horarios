@@ -9,24 +9,59 @@ import {
   Building2,
   CalendarDays,
   Calendar,
-  ClipboardList,
   FileText,
   GraduationCap,
+  History,
+  ShieldCheck,
+  User as UserIcon,
+  LogOut,
+  ChevronRight,
 } from 'lucide-react';
+import { useTRPC } from '@/trpc/client';
+import { useRouter } from 'next/navigation';
+import { useQuery, useMutation } from '@tanstack/react-query';
 
-const navigation = [
+const publicNavigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Docentes', href: '/docentes', icon: Users },
   { name: 'Cursos', href: '/cursos', icon: BookOpen },
   { name: 'Aulas', href: '/aulas', icon: Building2 },
   { name: 'Periodos', href: '/periodos', icon: CalendarDays },
-  { name: 'Sesiones', href: '/sesiones', icon: ClipboardList },
   { name: 'Horarios', href: '/horarios', icon: Calendar },
   { name: 'Reportes', href: '/reportes', icon: FileText },
 ];
 
+const docenteNavigation = [
+  { name: 'Mi Disponibilidad', href: '/disponibilidad', icon: Calendar },
+];
+
+const adminNavigation = [
+  { name: 'Sesiones de Llenado', href: '/sesiones', icon: Calendar },
+  { name: 'Gestión Usuarios', href: '/usuarios', icon: ShieldCheck },
+  { name: 'Bitácora', href: '/bitacora', icon: History },
+];
+
 export function Sidebar() {
   const pathname = usePathname();
+  const trpc = useTRPC();
+  const router = useRouter();
+
+  const { data: user } = useQuery({ ...trpc.auth.me.queryOptions() });
+  const logoutMutation = useMutation(
+    trpc.auth.logout.mutationOptions({
+      onSuccess: () => {
+        router.push('/login');
+        router.refresh();
+      },
+    })
+  );
+
+  const navigation = [...publicNavigation];
+  if (user?.role === 'ADMIN' || user?.role === 'REPRESENTANTE_ESCUELA') {
+    navigation.push(...adminNavigation);
+  } else if (user?.role === 'DOCENTE') {
+    navigation.push(...docenteNavigation);
+  }
 
   return (
     <aside className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-gray-900 border-r border-gray-800">
@@ -73,12 +108,33 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Footer */}
-      <div className="border-t border-gray-800 px-4 py-3">
-        <p className="text-[10px] text-gray-600 text-center">
-          Sistema de Horarios v2.0
-        </p>
-      </div>
+      {/* User Footer (Sólo si está logueado) */}
+      {user && (
+        <div className="border-t border-gray-800 p-4">
+          <div className="space-y-3">
+            <Link
+              href="/perfil"
+              className="flex items-center gap-3 rounded-lg p-2 hover:bg-gray-800 transition-colors group"
+            >
+              <div className="h-8 w-8 rounded-full bg-indigo-600/20 flex items-center justify-center border border-indigo-500/30">
+                <UserIcon className="h-4 w-4 text-indigo-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-white truncate">{user.nombre}</p>
+                <p className="text-[10px] text-gray-500 uppercase">{user.role}</p>
+              </div>
+              <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-gray-400" />
+            </Link>
+            <button
+              onClick={() => logoutMutation.mutate()}
+              className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              Cerrar Sesión
+            </button>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

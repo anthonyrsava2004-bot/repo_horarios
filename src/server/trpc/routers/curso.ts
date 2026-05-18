@@ -1,14 +1,20 @@
-import { z } from 'zod/v4';
-import { createTRPCRouter, baseProcedure } from '../init';
+import { z } from 'zod';
+import { createTRPCRouter, baseProcedure, adminProcedure, protectedProcedure, representanteProcedure } from '../init';
+import { TRPCError } from '@trpc/server';
 
 const cursoInput = z.object({
   codigo: z.string().min(2, 'El código es obligatorio'),
   nombre: z.string().min(3, 'El nombre debe tener al menos 3 caracteres'),
-  creditos: z.int().min(1).max(10),
-  horasTeoria: z.int().min(0),
-  horasLaboratorio: z.int().min(0),
-  ciclo: z.int().min(1).max(12),
+  creditos: z.number().int().min(1).max(10),
+  horasTeoria: z.number().int().min(0),
+  horasLaboratorio: z.number().int().min(0),
+  ciclo: z.number().int().min(1).max(12),
   requiereLaboratorio: z.boolean().optional().default(false),
+  perfilRequerido: z.string().optional(),
+  gradoRequerido: z.string().optional(),
+  experienciaMinima: z.number().int().min(0).optional(),
+  especialidadRequerida: z.string().optional(),
+  aperturado: z.boolean().optional().default(false),
 });
 
 const grupoInput = z.object({
@@ -21,7 +27,7 @@ export const cursoRouter = createTRPCRouter({
   list: baseProcedure
     .input(
       z.object({
-        ciclo: z.int().optional(),
+        ciclo: z.number().int().optional(),
         search: z.string().optional(),
       }).optional()
     )
@@ -66,37 +72,29 @@ export const cursoRouter = createTRPCRouter({
       });
     }),
 
-  create: baseProcedure
-    .input(cursoInput)
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.curso.create({ data: input });
-    }),
+  create: representanteProcedure.input(cursoInput).mutation(({ ctx, input }) => {
+    return ctx.prisma.curso.create({ data: input });
+  }),
 
-  update: baseProcedure
-    .input(z.object({ id: z.string() }).extend(cursoInput.partial().shape))
-    .mutation(async ({ ctx, input }) => {
+  update: representanteProcedure
+    .input(z.object({ id: z.string() }).merge(cursoInput))
+    .mutation(({ ctx, input }) => {
       const { id, ...data } = input;
       return ctx.prisma.curso.update({ where: { id }, data });
     }),
 
-  delete: baseProcedure
-    .input(z.object({ id: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.curso.delete({ where: { id: input.id } });
-    }),
+  delete: representanteProcedure.input(z.object({ id: z.string() })).mutation(({ ctx, input }) => {
+    return ctx.prisma.curso.delete({ where: { id: input.id } });
+  }),
 
-  // ── Grupo management ──────────────────────────
-  createGrupo: baseProcedure
-    .input(grupoInput)
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.grupo.create({ data: input });
-    }),
+  // Grupos
+  createGrupo: representanteProcedure.input(grupoInput).mutation(({ ctx, input }) => {
+    return ctx.prisma.grupo.create({ data: input });
+  }),
 
-  deleteGrupo: baseProcedure
-    .input(z.object({ id: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.grupo.delete({ where: { id: input.id } });
-    }),
+  deleteGrupo: representanteProcedure.input(z.object({ id: z.string() })).mutation(({ ctx, input }) => {
+    return ctx.prisma.grupo.delete({ where: { id: input.id } });
+  }),
 
   // Get all unique ciclos (for filters)
   ciclos: baseProcedure.query(async ({ ctx }) => {
@@ -106,5 +104,26 @@ export const cursoRouter = createTRPCRouter({
       orderBy: { ciclo: 'asc' },
     });
     return cursos.map((c) => c.ciclo);
+  }),
+
+  /** Aperture courses for the semester (Representative only) */
+  toggleApertura: representanteProcedure
+    .input(z.object({ id: z.string(), aperturado: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.curso.update({
+        where: { id: input.id },
+        data: { aperturado: input.aperturado },
+      });
+    }),
+
+  /** Start scheduling process (Representative only) */
+  startProcess: representanteProcedure.mutation(async ({ ctx }) => {
+    const periodo = await ctx.prisma.periodoAcademico.findFirst({ where: { activo: true } });
+    if (!periodo) throw new TRPCError({ code: 'NOT_FOUND' });
+
+    return ctx.prisma.periodoAcademico.update({
+      where: { id: periodo.id },
+      data: { estado: 'POSTULACION' },
+    });
   }),
 });
