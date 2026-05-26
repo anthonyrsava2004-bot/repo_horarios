@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { PrismaClient, CategoriaDocente, TipoDocente, TipoAula, DiaSemana, UserRole } from '../src/generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
-import bcrypt from 'bcryptjs';
+import bcryptjs from 'bcryptjs';
 
 const connectionString = process.env.DATABASE_URL!;
 const pool = new pg.Pool({ connectionString });
@@ -211,8 +211,8 @@ async function main() {
   console.log(`  ✅ ${feriadosData.length} feriados creados`);
 
   // ── Usuarios de Prueba ──────────────────────────────
-  const hashedPassword = await bcrypt.hash('admin123', 10);
-  const docentePassword = await bcrypt.hash('docente123', 10);
+  const hashedPassword = await bcryptjs.hash('admin123', 10);
+  const docentePassword = await bcryptjs.hash('docente123', 10);
 
   const admin = await prisma.user.create({
     data: {
